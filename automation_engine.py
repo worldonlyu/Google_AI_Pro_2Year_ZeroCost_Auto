@@ -43,6 +43,12 @@ TOK_MONTHLY      = "AVbCH/dSbs1UHItdkpohleJ9+69eSPWyFRutIpRUdGPlsdDKw2IMvRRHiwDe
 YT_FREE_TOK      = "AVbCH/eW4Nfp8KBl0zlm7x9PhaiCvpnqwUuL2D8NFPBQgmM9+HuYS1h2xH5lLWU/BsBj775LK5GqK8UHKqoSzhDDz+PqP3paNesqLU0r9i6XCrYa"
 PREFIX           = "subs:com.google.android.apps.subscriptions.red:"
 
+# Exact zero-price boundary pattern (matches "$0.00", "US$0.00", "0.00", etc., but rejects "$10.00" or "$20.00")
+_ZERO_PRICE_RE = re.compile(
+    r"(?<![0-9.])(?:US\$|HK\$|CA\$|A\$|NT\$|S\$|\$|€|£|¥|￥|₩|₹|R\$|CHF|SEK|NOK|DKK|PLN|TRY|IDR|PHP|THB|MYR|VND)?\s*0[.,]00(?!\d)",
+    re.IGNORECASE,
+)
+
 HOOK_JS = """
 (() => {
   if (typeof window.__setDirectTest !== 'function') {
@@ -586,7 +592,7 @@ class GoogleUltraAutomator:
 
             if "gds.google.com" in page_obj.url or "recoveryoptions" in page_obj.url or "确保您始终都能登录" in body or "Make sure you can always" in body:
                 self.log("Detected gds.google.com prompt page, clicking [Cancel / Skip]...")
-                cancel_btn = page_obj.locator('button:has-text("取消"), button:has-text("Cancel"), button:has-text("跳过"), button:has-text("Skip"), [role="button"]:has-text("取消"), [role="button"]:has-text("Cancel"), text="取消", text="Cancel"').first
+                cancel_btn = page_obj.locator('button:has-text("取消"), button:has-text("Cancel"), button:has-text("跳过"), button:has-text("Skip"), [role="button"]:has-text("取消"), [role="button"]:has-text("Cancel"), a:has-text("取消"), a:has-text("Cancel"), span:has-text("取消"), span:has-text("Cancel")').first
                 if await cancel_btn.count() > 0:
                     try:
                         await cancel_btn.click(timeout=3000)
@@ -737,7 +743,7 @@ class GoogleUltraAutomator:
             if await totp.count() > 0 and await totp.first.is_visible():
                 code = await self.ensure_totp_fresh()
                 if code:
-                    self.log(f"Auto-entering 2FA TOTP code: {code}")
+                    self.log("Auto-entering 2FA TOTP code: [******]")
                     try:
                         await totp.first.fill(code)
                         next_btn = page_obj.locator('#totpNext, button:has-text("下一步"), button:has-text("Next")').first
@@ -764,7 +770,7 @@ class GoogleUltraAutomator:
 
         await self.safe_goto(
             page,
-            "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Dzh-CN",
+            "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Den",
             timeout=40000,
         )
         await asyncio.sleep(3.5)
@@ -778,7 +784,7 @@ class GoogleUltraAutomator:
             except Exception:
                 body_txt = ""
 
-            if "gds.google.com" in page.url or "recoveryoptions" in page.url or "homeaddress" in page.url or "确保您始终都能登录" in body_txt or "设置住址" in body_txt:
+            if "gds.google.com" in page.url or "recoveryoptions" in page.url or "homeaddress" in page.url or "确保您始终都能登录" in body_txt or "Make sure you can always" in body_txt or "设置住址" in body_txt:
                 await page.evaluate(
                     """() => {
                     const els = Array.from(document.querySelectorAll('button, a, [role="button"], span'));
@@ -846,7 +852,7 @@ class GoogleUltraAutomator:
                 self.log("⚠️ Login page slow to respond, retrying login submission...")
                 await self.safe_goto(
                     page,
-                    "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Dzh-CN",
+                    "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Den",
                     timeout=40000,
                 )
                 await asyncio.sleep(3.5)
@@ -1209,8 +1215,16 @@ class GoogleUltraAutomator:
             except Exception as pm_err:
                 self.log(f"[{step_tag}] Note on switching card: {pm_err}")
 
-        # Strict zero-cost protection when running 2-year Pro stacking
-        if "ultra" not in step_tag.lower() and "0.00" not in clean_txt and "免费" not in clean_txt and "Free" not in clean_txt:
+        # Strict zero-cost protection when running 2-year Pro stacking (rejects $10.00 / $20.00 false matches)
+        has_zero_trial = (
+            bool(_ZERO_PRICE_RE.search(clean_txt))
+            or "免费试用" in clean_txt
+            or "Free trial" in clean_txt
+            or "0.00/mo" in clean_txt
+            or "0.00 per" in clean_txt
+            or "0.00 for" in clean_txt
+        )
+        if "ultra" not in step_tag.lower() and not has_zero_trial:
             self.last_subscribe_error = f"Zero-cost protection: modal did not show 0.00 free trial ({clean_txt[:180]})"
             self.log(f"❌ [{step_tag}] {self.last_subscribe_error}")
             return False
@@ -1315,7 +1329,7 @@ class GoogleUltraAutomator:
                         if await totp_inp.count() > 0 and await totp_inp.first.is_visible():
                             code = await self.ensure_totp_fresh()
                             if code:
-                                self.log(f"Detected embedded 2FA prompt, entering code: {code}")
+                                self.log("Detected embedded 2FA prompt, entering code: [******]")
                                 await totp_inp.first.fill(code)
                                 await page.keyboard.press("Enter")
                                 await asyncio.sleep(3)
@@ -1326,7 +1340,7 @@ class GoogleUltraAutomator:
                         if await cvc_inp.count() == 0 and ("CVC" in f2_txt or "安全码" in f2_txt or "security code" in f2_txt.lower()):
                             cvc_inp = f2.locator('input[type="tel"], input[type="password"]')
                         if await cvc_inp.count() > 0 and await cvc_inp.first.is_visible():
-                            self.log(f"Detected card security code (CVC) prompt, filling CVC: {cvc_code}")
+                            self.log("Detected card security code (CVC) prompt, filling CVC: [***]")
                             await cvc_inp.first.fill(cvc_code)
                             await asyncio.sleep(0.5)
                             vbtns = f2.locator(
@@ -1358,18 +1372,12 @@ class GoogleUltraAutomator:
                             for ok_kw in (
                                 "已订阅",
                                 "Subscribed",
+                                "You're subscribed",
                                 "感谢您订阅",
                                 "通过此类购买活动获取",
                                 "Google Play 积分",
                                 "Play Points",
                                 "Earn Google Play Points",
-                                "开启备用付款方式",
-                                "添加备用付款方式",
-                                "备用付款方式",
-                                "Backup payment",
-                                "以后再说",
-                                "知道了",
-                                "Got it",
                             )
                         ):
                             self.log(f"✅ [{step_tag}] Detected subscription confirmation success message!")
@@ -1485,7 +1493,7 @@ class GoogleUltraAutomator:
             self.log("✅ Account already completed Layer 1 12-month trial, skipping Step 2!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = None
@@ -1521,7 +1529,7 @@ class GoogleUltraAutomator:
             self.log("✅ Account already reaches 2028 (>=18 months), skipping Step 3!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = await self.get_current_sub_id(page)
@@ -1553,7 +1561,7 @@ class GoogleUltraAutomator:
             self.log("✅ Account already reached 24-month free period (Late 2028), skipping Step 4!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = await self.get_current_sub_id(page)
@@ -1748,7 +1756,7 @@ class GoogleUltraAutomator:
                 await self.proxy_bridge.start()
                 chrome_args.append(f"--proxy-server=http://127.0.0.1:{bridge_port}")
                 self.log(
-                    f"🛡️ Attached residential proxy tunnel for [{self.account['id']}] -> {parsed_proxy['host']}:{parsed_proxy['port']} (Session: {parsed_proxy['username'][:28]}...)"
+                    f"🛡️ Attached residential proxy tunnel for [{self.account['id']}] -> {parsed_proxy['host']}:{parsed_proxy['port']} (Proxy account: [***])"
                 )
             else:
                 p_url = f"{parsed_proxy['scheme']}://{parsed_proxy['host']}:{parsed_proxy['port']}"
@@ -1759,22 +1767,68 @@ class GoogleUltraAutomator:
 
         chrome_args.append("about:blank")
 
+        # Cleanly terminate any lingering Chrome instance holding the same user_data_dir (e.g. from manual Browser button)
+        lockfile_path = os.path.join(user_data_dir, "lockfile")
+        if os.path.exists(lockfile_path):
+            try:
+                os.remove(lockfile_path)
+            except OSError:
+                self.log("Closing existing manual Chrome session for this profile before starting automation...")
+                profile_folder = os.path.basename(os.path.normpath(user_data_dir))
+                try:
+                    ps_cmd = (
+                        f"Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" | "
+                        f"Where-Object {{ $_.CommandLine -like '*{profile_folder}*' }} | "
+                        f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+                    )
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", ps_cmd],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=6,
+                    )
+                except Exception:
+                    pass
+
         # Cleanly kill any lingering process listening on self.port
         try:
-            net_out = subprocess.check_output(f"netstat -ano | findstr :{self.port}", shell=True).decode("gbk", errors="ignore")
+            net_out = subprocess.check_output(
+                ["netstat", "-ano"], stderr=subprocess.DEVNULL
+            ).decode("gbk", errors="ignore")
+            port_tag = f":{self.port}"
             for line in net_out.splitlines():
-                if "LISTENING" in line:
+                if "LISTENING" in line and port_tag in line:
                     old_pid = line.strip().split()[-1]
-                    subprocess.run(f"taskkill /F /T /PID {old_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if old_pid.isdigit():
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", old_pid],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
         except Exception:
             pass
         await asyncio.sleep(0.8)
 
         try:
             self.proc = subprocess.Popen(chrome_args)
-            await asyncio.sleep(2.8)
             async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                browser = None
+                last_cdp_err = None
+                for _ in range(20):
+                    await asyncio.sleep(0.7)
+                    if self.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Chrome process exited prematurely (exit code {self.proc.returncode}). "
+                            "Ensure no other Chrome window is locking this account profile."
+                        )
+                    try:
+                        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                        break
+                    except Exception as cdp_err:
+                        last_cdp_err = cdp_err
+                if browser is None:
+                    raise RuntimeError(f"Timed out connecting to Chrome CDP on port {self.port}: {last_cdp_err}")
+
                 context = browser.contexts[0]
                 await context.add_init_script("window.__INIT_TEST = null;\n" + HOOK_JS)
 
@@ -1807,6 +1861,10 @@ class GoogleUltraAutomator:
                 await self.proxy_bridge.stop()
             if self.proc:
                 try:
-                    subprocess.run(f"taskkill /F /T /PID {self.proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 except Exception:
                     pass
