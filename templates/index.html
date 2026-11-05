@@ -628,10 +628,11 @@
 
     function renderAccounts(accounts) {
       const tbody = document.getElementById('accountsTbody');
-      tbody.innerHTML = accounts.map(acc => {
+      window.__accountsCache = accounts;
+      tbody.innerHTML = accounts.map((acc, idx) => {
         const savedStart = selectedStartSteps[acc.id] || 1;
         const shotBtn = acc.last_screenshot
-          ? `<button class="btn-sm btn-secondary" onclick="showScreenshot('${acc.id}', '${acc.last_screenshot}')">🖼 查看</button>`
+          ? `<button class="btn-sm btn-secondary" onclick="showScreenshotByIdx(${idx})">🖼 查看</button>`
           : `<span style="color:var(--muted);font-size:12px;">-</span>`;
 
         const totpHtml = (acc.totp_secret && acc.totp_now && acc.totp_now !== '------')
@@ -643,24 +644,24 @@
 
         return `
           <tr>
-            <td><strong>${acc.id}</strong></td>
+            <td><strong>${escapeHtml(acc.id)}</strong></td>
             <td>
-              <div style="font-weight:600; color:#f1f5f9;">${acc.email}</div>
+              <div style="font-weight:600; color:#f1f5f9;">${escapeHtml(acc.email)}</div>
               <div style="font-size:11.5px; color:var(--muted); font-family:Consolas,monospace;">
-                密码: ${acc.password}
-                ${acc.recovery_email ? `<br/>辅助: ${acc.recovery_email}` : ''}
-                ${acc.ip_info ? `<span style="margin-left:6px; color:#38bdf8;">[${acc.ip_info}]</span>` : (acc.proxy ? `<span style="margin-left:6px; color:#a78bfa;">[独立代理]</span>` : '')}
+                密码: ••••••••
+                ${acc.recovery_email ? `<br/>辅助: ${escapeHtml(acc.recovery_email)}` : ''}
+                ${acc.ip_info ? `<span style="margin-left:6px; color:#38bdf8;">[${escapeHtml(acc.ip_info)}]</span>` : (acc.proxy ? `<span style="margin-left:6px; color:#a78bfa;">[独立代理]</span>` : '')}
               </div>
             </td>
             <td>${totpHtml}</td>
             <td>${statusBadgeHtml(acc.status)}</td>
             <td>
               ${stepDotsHtml(acc.current_step || 0, acc.status)}
-              <div class="step-msg">${acc.step_message || ''}</div>
+              <div class="step-msg">${escapeHtml(acc.step_message || '')}</div>
             </td>
             <td>
               <span style="font-weight:600; color:${(acc.expiry_date || '').includes('2027年10月') || (acc.expiry_date || '').includes('2027年11月') || (acc.expiry_date || '').includes('2028') ? '#34d399' : '#e2e8f0'}">
-                ${acc.expiry_date || '-'}
+                ${escapeHtml(acc.expiry_date || '-')}
               </span>
             </td>
             <td>${shotBtn}</td>
@@ -668,7 +669,7 @@
               <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
                 <select
                   style="padding:4px 6px; font-size:12px;"
-                  onchange="selectedStartSteps['${acc.id}'] = parseInt(this.value)"
+                  onchange="setStartStepByIdx(${idx}, this.value)"
                 >
                   <option value="1" ${savedStart === 1 ? 'selected' : ''}>从 Step 1 全跑</option>
                   <option value="2" ${savedStart === 2 ? 'selected' : ''}>从 Step 2 首层12M($0)</option>
@@ -678,26 +679,26 @@
                 </select>
                 <button
                   class="btn-sm ${acc.is_running ? 'btn-danger' : 'btn-success'}"
-                  onclick="${acc.is_running ? `stopSingle('${acc.id}')` : `runSingle('${acc.id}')`}"
+                  onclick="${acc.is_running ? `stopSingleByIdx(${idx})` : `runSingleByIdx(${idx})`}"
                 >
                   ${acc.is_running ? '⏹ 停止' : '▶ 启动一条龙'}
                 </button>
                 <button
                   class="btn-sm ${openedBrowserMap[acc.id] ? 'btn-success' : 'btn-secondary'}"
-                  onclick="openBrowser('${acc.id}')"
+                  onclick="openBrowserByIdx(${idx})"
                   title="手动打开该账号的独立 Chrome 窗口"
                 >
                   ${openedBrowserMap[acc.id] ? '✅ 已打开' : '🌐 浏览器'}
                 </button>
-                <button class="btn-sm btn-secondary" onclick="resetAccount('${acc.id}')" title="重置状态为待执行">
+                <button class="btn-sm btn-secondary" onclick="resetAccountByIdx(${idx})" title="重置状态为待执行">
                   🔄
                 </button>
-                <button class="btn-sm btn-secondary" onclick="deleteAccount('${acc.id}')" title="移除此账号">
+                <button class="btn-sm btn-secondary" onclick="deleteAccountByIdx(${idx})" title="移除此账号">
                   🗑️
                 </button>
                 <button
                   class="btn-sm ${copiedAccountMap[acc.id] ? 'btn-success' : 'btn-secondary'}"
-                  onclick="copyAccountFull('${acc.id}', '${acc.email}', '${acc.password}', '${acc.totp_secret || acc.recovery_email || ''}')"
+                  onclick="copyAccountFullByIdx(${idx})"
                   title="一键复制账号信息"
                 >
                   ${copiedAccountMap[acc.id] ? '✅ 已复制' : '📋 复制'}
@@ -725,8 +726,20 @@
     }
 
     function escapeHtml(str) {
-      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return String(str == null ? '' : str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
+
+    // 账号字段全部来自导入文本（不可信）：渲染一律 escapeHtml，按钮一律按下标回查缓存，
+    // 严禁把邮箱/密码/2FA 密钥拼进 innerHTML 或 inline onclick（防注入 + 防明文进 DOM）。
+    function accByIdx(idx) { return (window.__accountsCache || [])[idx]; }
+    function runSingleByIdx(idx) { const a = accByIdx(idx); if (a) runSingle(a.id); }
+    function stopSingleByIdx(idx) { const a = accByIdx(idx); if (a) stopSingle(a.id); }
+    function openBrowserByIdx(idx) { const a = accByIdx(idx); if (a) openBrowser(a.id); }
+    function resetAccountByIdx(idx) { const a = accByIdx(idx); if (a) resetAccount(a.id); }
+    function deleteAccountByIdx(idx) { const a = accByIdx(idx); if (a) deleteAccount(a.id); }
+    function showScreenshotByIdx(idx) { const a = accByIdx(idx); if (a) showScreenshot(a.id, a.last_screenshot); }
+    function copyAccountFullByIdx(idx) { const a = accByIdx(idx); if (a) copyAccountFull(a.id, a.email, a.password, a.totp_secret || a.recovery_email || ''); }
+    function setStartStepByIdx(idx, v) { const a = accByIdx(idx); if (a) selectedStartSteps[a.id] = parseInt(v); }
 
     function onRegionChange(region) {
       document.getElementById('cfgAddr').value = '700 SW 5th Ave';

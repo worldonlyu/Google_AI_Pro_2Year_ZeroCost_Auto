@@ -404,70 +404,13 @@ MANUAL_BRIDGES: Dict[str, LocalHttpProxyAuthBridge] = {}
 
 def _launch_on_interactive_desktop(args: List[str]):
     """
-    Launch a GUI process (e.g. Chrome) explicitly onto the user's interactive desktop (winsta0\\default)
-    even if the backend server was started inside an isolated/background desktop session (e.g. exebox).
+    Launch a GUI process (e.g. Chrome) with a plain subprocess call.
+
+    历史实现用 Win32 原生进程创建 API 指定交互桌面会话穿透启动，
+    这是木马/提权工具的典型注入特征，会触发 Windows Defender 启发式报毒
+    (Trojan/HackTool) 并隔离文件（Issue #19）。本程序由用户在自己的交互桌面
+    双击启动，根本不需要跨会话启动，直接 Popen 即可。
     """
-    if os.name == "nt":
-        try:
-            import ctypes
-            import ctypes.wintypes as wt
-
-            class STARTUPINFOW(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wt.DWORD),
-                    ("lpReserved", wt.LPWSTR),
-                    ("lpDesktop", wt.LPWSTR),
-                    ("lpTitle", wt.LPWSTR),
-                    ("dwX", wt.DWORD),
-                    ("dwY", wt.DWORD),
-                    ("dwXSize", wt.DWORD),
-                    ("dwYSize", wt.DWORD),
-                    ("dwXCountChars", wt.DWORD),
-                    ("dwYCountChars", wt.DWORD),
-                    ("dwFillAttribute", wt.DWORD),
-                    ("dwFlags", wt.DWORD),
-                    ("wShowWindow", wt.WORD),
-                    ("cbReserved2", wt.WORD),
-                    ("lpReserved2", ctypes.POINTER(wt.BYTE)),
-                    ("hStdInput", wt.HANDLE),
-                    ("hStdOutput", wt.HANDLE),
-                    ("hStdError", wt.HANDLE),
-                ]
-
-            class PROCESS_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("hProcess", wt.HANDLE),
-                    ("hThread", wt.HANDLE),
-                    ("dwProcessId", wt.DWORD),
-                    ("dwThreadId", wt.DWORD),
-                ]
-
-            si = STARTUPINFOW()
-            si.cb = ctypes.sizeof(si)
-            si.lpDesktop = "winsta0\\default"
-            si.dwFlags = 1  # STARTF_USESHOWWINDOW
-            si.wShowWindow = 3  # SW_MAXIMIZE
-            pi = PROCESS_INFORMATION()
-            cmd_str = subprocess.list2cmdline(args)
-            cmd_buf = ctypes.create_unicode_buffer(cmd_str)
-            ok = ctypes.windll.kernel32.CreateProcessW(
-                None,
-                cmd_buf,
-                None,
-                None,
-                False,
-                0x00000010,  # CREATE_NEW_CONSOLE
-                None,
-                None,
-                ctypes.byref(si),
-                ctypes.byref(pi),
-            )
-            if ok:
-                ctypes.windll.kernel32.CloseHandle(pi.hThread)
-                ctypes.windll.kernel32.CloseHandle(pi.hProcess)
-                return
-        except Exception:
-            pass
     subprocess.Popen(args)
 
 
