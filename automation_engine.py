@@ -5,8 +5,11 @@ import hmac
 import json
 import os
 import re
+import shutil
+import signal
 import socket
 import struct
+import sys
 import subprocess
 import urllib.parse
 import time
@@ -14,15 +17,103 @@ from typing import Callable, Dict, Any, Optional
 from playwright.async_api import async_playwright
 
 def _find_chrome_path() -> str:
-    candidates = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-    ]
+    """跨平台定位 Chrome/Chromium：环境变量 CHROME_PATH > PATH 查找 > 各平台默认安装路径。"""
+    env_path = (os.environ.get("CHROME_PATH") or "").strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    for name in ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser", "chrome.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    else:  # Linux / Ubuntu
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+            "/opt/google/chrome/chrome",
+        ]
     for p in candidates:
         if os.path.exists(p):
             return p
-    return candidates[0]
+    return candidates[0] if candidates else "google-chrome"
+
+
+def _kill_pid_tree(pid) -> None:
+    """跨平台结束进程树：Windows 用 taskkill /T，Linux/macOS 结束整个进程组。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid <= 0:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            return
+    for _ in range(15):
+        try:
+            os.kill(pid, 0)
+        except Exception:
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _kill_listener_on_port(port) -> None:
+    """清理占用指定端口的残留进程（跨平台）。"""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return
+    if os.name == "nt":
+        try:
+            net_out = subprocess.check_output(["netstat", "-ano"], timeout=10).decode("gbk", errors="ignore")
+            for line in net_out.splitlines():
+                if "LISTENING" in line and f":{port}" in line:
+                    old_pid = line.strip().split()[-1]
+                    if old_pid.isdigit():
+                        _kill_pid_tree(int(old_pid))
+        except Exception:
+            pass
+        return
+    # Linux: fuser 最直接；无 fuser 时用 ss 解析 PID
+    try:
+        if shutil.which("fuser"):
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which("ss"):
+            ss_out = subprocess.check_output(["ss", "-ltnp"], timeout=10).decode("utf-8", errors="ignore")
+            for line in ss_out.splitlines():
+                if f":{port} " in line or f":{port}\t" in line:
+                    for m in re.findall(r"pid=(\d+)", line):
+                        _kill_pid_tree(int(m))
+    except Exception:
+        pass
 
 
 CHROME_PATH = _find_chrome_path()
@@ -1767,21 +1858,22 @@ class GoogleUltraAutomator:
         else:
             self.log(f"正在启动 Chrome 独立环境 (端口: {self.port}, 未配置独立代理，使用系统当前网络)...")
 
+        if os.name != "nt":
+            # Linux 容器/虚拟机 /dev/shm 偏小会导致 Chrome 崩溃；以 root 运行时必须 --no-sandbox
+            chrome_args.append("--disable-dev-shm-usage")
+            try:
+                if os.geteuid() == 0:
+                    chrome_args.append("--no-sandbox")
+            except AttributeError:
+                pass
+
         chrome_args.append("about:blank")
 
-        # Cleanly kill any lingering process listening on self.port
-        try:
-            net_out = subprocess.check_output(["netstat", "-ano"], timeout=10).decode("gbk", errors="ignore")
-            for line in net_out.splitlines():
-                if "LISTENING" in line and f":{int(self.port)}" in line:
-                    old_pid = line.strip().split()[-1]
-                    if old_pid.isdigit():
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", old_pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        # Cleanly kill any lingering process listening on self.port (cross-platform)
+        _kill_listener_on_port(self.port)
         await asyncio.sleep(0.8)
 
-        self.proc = subprocess.Popen(chrome_args)
+        self.proc = subprocess.Popen(chrome_args, start_new_session=(os.name != "nt"))
         await asyncio.sleep(2.8)
 
         try:
@@ -1818,7 +1910,4 @@ class GoogleUltraAutomator:
             if self.proxy_bridge:
                 await self.proxy_bridge.stop()
             if self.proc:
-                try:
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(self.proc.pid))], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+                _kill_pid_tree(self.proc.pid)

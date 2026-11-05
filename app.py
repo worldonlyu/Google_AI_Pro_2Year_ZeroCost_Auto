@@ -454,6 +454,14 @@ async def open_browser_manual(req: AccountActionReq):
             p_url = f"{parsed_proxy['scheme']}://{parsed_proxy['host']}:{parsed_proxy['port']}"
             chrome_args.append(f"--proxy-server={p_url}")
 
+    if os.name != "nt":
+        chrome_args.append("--disable-dev-shm-usage")
+        try:
+            if os.geteuid() == 0:
+                chrome_args.append("--no-sandbox")
+        except AttributeError:
+            pass
+
     chrome_args.extend(
         [
             "https://one.google.com/plans?hl=zh-CN",
