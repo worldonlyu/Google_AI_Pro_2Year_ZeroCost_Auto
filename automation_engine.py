@@ -5,8 +5,11 @@ import hmac
 import json
 import os
 import re
+import shutil
+import signal
 import socket
 import struct
+import sys
 import subprocess
 import urllib.parse
 import time
@@ -14,15 +17,103 @@ from typing import Callable, Dict, Any, Optional
 from playwright.async_api import async_playwright
 
 def _find_chrome_path() -> str:
-    candidates = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-    ]
+    """跨平台定位 Chrome/Chromium：环境变量 CHROME_PATH > PATH 查找 > 各平台默认安装路径。"""
+    env_path = (os.environ.get("CHROME_PATH") or "").strip()
+    if env_path and os.path.exists(env_path):
+        return env_path
+    for name in ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser", "chrome.exe"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if os.name == "nt":
+        candidates = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        ]
+    elif sys.platform == "darwin":
+        candidates = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    else:  # Linux / Ubuntu
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+            "/opt/google/chrome/chrome",
+        ]
     for p in candidates:
         if os.path.exists(p):
             return p
-    return candidates[0]
+    return candidates[0] if candidates else "google-chrome"
+
+
+def _kill_pid_tree(pid) -> None:
+    """跨平台结束进程树：Windows 用 taskkill /T，Linux/macOS 结束整个进程组。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return
+    if pid <= 0:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            return
+    for _ in range(15):
+        try:
+            os.kill(pid, 0)
+        except Exception:
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _kill_listener_on_port(port) -> None:
+    """清理占用指定端口的残留进程（跨平台）。"""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return
+    if os.name == "nt":
+        try:
+            net_out = subprocess.check_output(["netstat", "-ano"], timeout=10).decode("gbk", errors="ignore")
+            for line in net_out.splitlines():
+                if "LISTENING" in line and f":{port}" in line:
+                    old_pid = line.strip().split()[-1]
+                    if old_pid.isdigit():
+                        _kill_pid_tree(int(old_pid))
+        except Exception:
+            pass
+        return
+    # Linux: fuser 最直接；无 fuser 时用 ss 解析 PID
+    try:
+        if shutil.which("fuser"):
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if shutil.which("ss"):
+            ss_out = subprocess.check_output(["ss", "-ltnp"], timeout=10).decode("utf-8", errors="ignore")
+            for line in ss_out.splitlines():
+                if f":{port} " in line or f":{port}\t" in line:
+                    for m in re.findall(r"pid=(\d+)", line):
+                        _kill_pid_tree(int(m))
+    except Exception:
+        pass
 
 
 CHROME_PATH = _find_chrome_path()
@@ -42,6 +133,28 @@ TOK_P1M          = "AVbCH/dXbuvFhoeuGZb/+3+b5Jhft4kOY/wQLGqLhy0hhx6hDAJ/1z9y23+x
 TOK_MONTHLY      = "AVbCH/dSbs1UHItdkpohleJ9+69eSPWyFRutIpRUdGPlsdDKw2IMvRRHiwDefRVyEHl12jqfmBgQZByeX7hJ"
 YT_FREE_TOK      = "AVbCH/eW4Nfp8KBl0zlm7x9PhaiCvpnqwUuL2D8NFPBQgmM9+HuYS1h2xH5lLWU/BsBj775LK5GqK8UHKqoSzhDDz+PqP3paNesqLU0r9i6XCrYa"
 PREFIX           = "subs:com.google.android.apps.subscriptions.red:"
+
+# --- 零消费保护（fail-closed）---
+# 旧逻辑用 "0.00" in text 判断：$10.00 / $20.00 / $100.00 都包含子串 "0.00"，会被误判为 0 元；
+# 且只要页面任意位置出现“免费”字样（如“首月免费，次月 $19.99”）也会放行。
+# 现改为：必须命中带货币符号的精确 0.00（如 US$0.00 / $0.00 / ￥0.00），或明确“免费试用/Free trial”；
+# 同时弹窗任意位置出现任何非零金额一律拦截（宁可误拦、人工确认，绝不误扣）。
+_ZERO_PRICE_RE = re.compile(r"(?<![0-9])(?:US\$|HK\$|\$|￥|¥|€|£)\s*0\.00(?!\d)")
+_NONZERO_PRICE_RE = re.compile(
+    r"(?<![0-9])(?:US\$|HK\$|\$|￥|¥|€|£)\s*(?:[1-9]\d*(?:[.,]\d{2})?|0\.(?:0[1-9]|[1-9]\d))(?!\d)"
+)
+
+
+def check_zero_cost(clean_txt: str):
+    """返回 (ok, reason)。ok=True 才允许点击【订阅】。"""
+    txt = clean_txt or ""
+    has_exact_zero = bool(_ZERO_PRICE_RE.search(txt)) or ("免费试用" in txt) or ("Free trial" in txt)
+    has_non_zero_fee = bool(_NONZERO_PRICE_RE.search(txt))
+    if has_non_zero_fee:
+        return False, f"零消费拦截：弹窗存在非零金额 ({txt[:150]})"
+    if not has_exact_zero:
+        return False, f"零消费拦截：未检测到精确 $0.00 / 免费试用 ({txt[:150]})"
+    return True, ""
 
 HOOK_JS = """
 (() => {
@@ -731,7 +844,7 @@ class GoogleUltraAutomator:
             if await totp.count() > 0 and await totp.first.is_visible():
                 code = await self.ensure_totp_fresh()
                 if code:
-                    self.log(f"正在自动填入 2FA 动态验证码: {code}")
+                    self.log("正在自动填入 2FA 动态验证码: [******]")
                     try:
                         await totp.first.fill(code)
                         next_btn = page_obj.locator('#totpNext, button:has-text("下一步"), button:has-text("Next")').first
@@ -1202,11 +1315,13 @@ class GoogleUltraAutomator:
             except Exception as pm_err:
                 self.log(f"[{step_tag}] 切换付款卡提示: {pm_err}")
 
-        # Strict zero-cost protection when running 2-year Pro stacking
-        if "ultra" not in step_tag.lower() and "0.00" not in clean_txt and "免费" not in clean_txt and "Free" not in clean_txt:
-            self.last_subscribe_error = f"零消费保护拦截：弹窗未显示 0.00 免费试用 ({clean_txt[:180]})"
-            self.log(f"❌ [{step_tag}] {self.last_subscribe_error}")
-            return False
+        # Strict zero-cost protection when running 2-year Pro stacking (fail-closed, see check_zero_cost)
+        if "ultra" not in step_tag.lower():
+            zero_ok, zero_reason = check_zero_cost(clean_txt)
+            if not zero_ok:
+                self.last_subscribe_error = zero_reason
+                self.log(f"❌ [{step_tag}] {self.last_subscribe_error}")
+                return False
 
         if expect_keywords:
             for kw in expect_keywords:
@@ -1308,7 +1423,7 @@ class GoogleUltraAutomator:
                         if await totp_inp.count() > 0 and await totp_inp.first.is_visible():
                             code = await self.ensure_totp_fresh()
                             if code:
-                                self.log(f"检测到内嵌 2FA 验证框，正在填入动态码: {code}")
+                                self.log("检测到内嵌 2FA 验证框，正在填入动态码: [******]")
                                 await totp_inp.first.fill(code)
                                 await page.keyboard.press("Enter")
                                 await asyncio.sleep(3)
@@ -1319,7 +1434,7 @@ class GoogleUltraAutomator:
                         if await cvc_inp.count() == 0 and ("CVC" in f2_txt or "安全码" in f2_txt or "security code" in f2_txt.lower()):
                             cvc_inp = f2.locator('input[type="tel"], input[type="password"]')
                         if await cvc_inp.count() > 0 and await cvc_inp.first.is_visible():
-                            self.log(f"检测到银行卡安全码 (CVC) 验证框，自动填入 CVC: {cvc_code}")
+                            self.log("检测到银行卡安全码 (CVC) 验证框，自动填入 CVC: [***]")
                             await cvc_inp.first.fill(cvc_code)
                             await asyncio.sleep(0.5)
                             vbtns = f2.locator(
@@ -1346,6 +1461,9 @@ class GoogleUltraAutomator:
                     try:
                         ft_after = f2_txt
                         clean_after = " | ".join([l.strip() for l in ft_after.splitlines() if l.strip()])
+                        # 成功判定只认正式回执词。过渡/挽留词（备用付款方式、以后再说、知道了、
+                        # Got it、Backup payment 等）单独出现绝不算成功——最终以各 Step 在
+                        # Google Play 订阅页校验到的真实到期时间为准（Step2/3/4/5 均已加验真）。
                         if any(
                             ok_kw in clean_after
                             for ok_kw in (
@@ -1356,13 +1474,6 @@ class GoogleUltraAutomator:
                                 "Google Play 积分",
                                 "Play Points",
                                 "Earn Google Play Points",
-                                "开启备用付款方式",
-                                "添加备用付款方式",
-                                "备用付款方式",
-                                "Backup payment",
-                                "以后再说",
-                                "知道了",
-                                "Got it",
                             )
                         ):
                             self.log(f"✅ [{step_tag}] 检测到订阅成功确认提示！")
@@ -1489,8 +1600,11 @@ class GoogleUltraAutomator:
             ok = await self.open_and_click_subscribe(page, cfg_l1, "step2_layer1_12m")
         if not ok:
             raise RuntimeError(f"Step 2 (首层 12个月免费叠加 US$0.00) 未成功: {self.last_subscribe_error}")
-        self.log("✅ Step 2 (首层 12个月免费包 US$0.00) 订阅完成！正在等待 45 秒让 Google Play 后台彻底完成清算...")
+        self.log("✅ Step 2 (首层 12个月免费包 US$0.00) 已收到强成功回执！正在等待 45 秒让 Google Play 后台彻底完成清算...")
         await asyncio.sleep(45)
+        play_after2 = await self.inspect_play_subscriptions(page)
+        if not any(k in play_after2 for k in ("2027年10月", "2027年11月", "2027年12月", "Oct 2027", "Nov 2027", "Dec 2027", "2028")):
+            raise RuntimeError("Step 2 验真失败：Play 订阅页到期日未推进至 2027年10月以后，拒绝假成功")
 
     async def step3_layer2_6mss(self, page):
         self.update_state(status="running", current_step=3, step_message="Step 3/5: 正在执行二层 6个月免费叠加 (US$0.00 -> 18个月 / 2028年4月)...")
@@ -1523,8 +1637,11 @@ class GoogleUltraAutomator:
             ok = await self.open_and_click_subscribe(page, cfg_l2, "step3_layer2_6mss")
         if not ok:
             raise RuntimeError(f"Step 3 (二层 6个月免费叠加 US$0.00) 未成功: {self.last_subscribe_error}")
-        self.log("✅ Step 3 (二层 6个月免费包 US$0.00 -> 18个月) 叠加完成！等待 45 秒同步订阅 ID...")
+        self.log("✅ Step 3 (二层 6个月免费包 US$0.00 -> 18个月) 已收到强成功回执！等待 45 秒同步订阅 ID...")
         await asyncio.sleep(45)
+        play_after3 = await self.inspect_play_subscriptions(page)
+        if not any(k in play_after3 for k in ("2028年4月", "2028年5月", "2028年6月", "2028年10月", "2028年11月", "2028年12月", "Apr 2028", "May 2028", "Jun 2028", "Oct 2028", "Nov 2028", "Dec 2028")):
+            raise RuntimeError("Step 3 验真失败：Play 订阅页到期日未推进至 2028年，拒绝假成功")
 
     async def step4_layer3_6m(self, page):
         self.update_state(status="running", current_step=4, step_message="Step 4/5: 正在执行三层 6个月免费封顶 (US$0.00 -> 24个月 / 2028年10月)...")
@@ -1649,10 +1766,13 @@ class GoogleUltraAutomator:
         final_txt = " | ".join([l.strip() for l in (await page.inner_text("body")).splitlines() if l.strip()])
         self.log(f"最终 Play 订阅页状态: {final_txt[:400]}")
 
-        # Parse expiry date from final_txt
+        # Parse expiry date from final_txt —— 验真不过关绝不报 completed（防假成功）
         m_date = re.search(r"(?:取消日期[：:]\s*|续订日期[：:]\s*|将于\s*)([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}日)", final_txt)
-        exp_str = m_date.group(1) if m_date else "已激活 (详见截图)"
+        exp_str = m_date.group(1) if m_date else ""
         plan_found = "Google AI Pro (5 TB)" if "5 TB" in final_txt else ("Google AI Ultra (20 TB)" if "20 TB" in final_txt else ("Google AI Ultra (30 TB)" if "30 TB" in final_txt else "Google AI Pro"))
+        if not exp_str.startswith("2028") or not any(k in final_txt for k in ("Google AI", "Google One", "5 TB")):
+            self.update_state(status="error", step_message=f"❌ Step 5 验真失败：Play 订阅页未解析到 2028 年到期日或套餐信息 (解析到期日: {exp_str or '无'})")
+            raise RuntimeError(f"Step 5 验真失败：未在 Play 订阅页确认 2028 年到期日 (解析: {exp_str or '无'})，拒绝假成功")
 
         self.update_state(
             status="completed",
@@ -1729,7 +1849,7 @@ class GoogleUltraAutomator:
                 await self.proxy_bridge.start()
                 chrome_args.append(f"--proxy-server=http://127.0.0.1:{bridge_port}")
                 self.log(
-                    f"🛡️ 已为 [{self.account['id']}] 挂载专属住宅代理隧道 -> {parsed_proxy['host']}:{parsed_proxy['port']} (会话: {parsed_proxy['username'][:28]}...)"
+                    f"🛡️ 已为 [{self.account['id']}] 挂载专属住宅代理隧道 -> {parsed_proxy['host']}:{parsed_proxy['port']} (代理账号: [***])"
                 )
             else:
                 p_url = f"{parsed_proxy['scheme']}://{parsed_proxy['host']}:{parsed_proxy['port']}"
@@ -1738,20 +1858,22 @@ class GoogleUltraAutomator:
         else:
             self.log(f"正在启动 Chrome 独立环境 (端口: {self.port}, 未配置独立代理，使用系统当前网络)...")
 
+        if os.name != "nt":
+            # Linux 容器/虚拟机 /dev/shm 偏小会导致 Chrome 崩溃；以 root 运行时必须 --no-sandbox
+            chrome_args.append("--disable-dev-shm-usage")
+            try:
+                if os.geteuid() == 0:
+                    chrome_args.append("--no-sandbox")
+            except AttributeError:
+                pass
+
         chrome_args.append("about:blank")
 
-        # Cleanly kill any lingering process listening on self.port
-        try:
-            net_out = subprocess.check_output(f"netstat -ano | findstr :{self.port}", shell=True).decode("gbk", errors="ignore")
-            for line in net_out.splitlines():
-                if "LISTENING" in line:
-                    old_pid = line.strip().split()[-1]
-                    subprocess.run(f"taskkill /F /T /PID {old_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        # Cleanly kill any lingering process listening on self.port (cross-platform)
+        _kill_listener_on_port(self.port)
         await asyncio.sleep(0.8)
 
-        self.proc = subprocess.Popen(chrome_args)
+        self.proc = subprocess.Popen(chrome_args, start_new_session=(os.name != "nt"))
         await asyncio.sleep(2.8)
 
         try:
@@ -1788,7 +1910,4 @@ class GoogleUltraAutomator:
             if self.proxy_bridge:
                 await self.proxy_bridge.stop()
             if self.proc:
-                try:
-                    subprocess.run(f"taskkill /F /T /PID {self.proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+                _kill_pid_tree(self.proc.pid)

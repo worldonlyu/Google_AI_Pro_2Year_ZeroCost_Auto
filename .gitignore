@@ -1,0 +1,23 @@
+# === 敏感数据：绝不提交 ===
+# config.json 内含真实银行卡号/CVC、Google 账号密码与 2FA 密钥
+config.json
+.env
+*.env
+
+# Chrome 账号档案：内含已登录 Google 的会话 Cookie，等同账号本身
+profiles/
+
+# 截图：可能包含账号、卡尾号与订阅信息
+screenshots/
+
+# Python / 工具缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
