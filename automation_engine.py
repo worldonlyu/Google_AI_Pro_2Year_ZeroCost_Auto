@@ -18,11 +18,12 @@ def _find_chrome_path() -> str:
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     ]
     for p in candidates:
         if os.path.exists(p):
             return p
-    return candidates[0]
+    return candidates[0] if os.name == "nt" else candidates[3]
 
 
 CHROME_PATH = _find_chrome_path()
@@ -1742,11 +1743,15 @@ class GoogleUltraAutomator:
 
         # Cleanly kill any lingering process listening on self.port
         try:
-            net_out = subprocess.check_output(f"netstat -ano | findstr :{self.port}", shell=True).decode("gbk", errors="ignore")
-            for line in net_out.splitlines():
-                if "LISTENING" in line:
-                    old_pid = line.strip().split()[-1]
-                    subprocess.run(f"taskkill /F /T /PID {old_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.name == "nt":
+                net_out = subprocess.check_output(f"netstat -ano | findstr :{self.port}", shell=True).decode("gbk", errors="ignore")
+                for line in net_out.splitlines():
+                    if "LISTENING" in line:
+                        old_pid = line.strip().split()[-1]
+                        subprocess.run(f"taskkill /F /T /PID {old_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                for pid in subprocess.check_output(["lsof", "-ti", f"tcp:{self.port}"]).decode().split():
+                    subprocess.run(["kill", "-9", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
         await asyncio.sleep(0.8)
@@ -1789,6 +1794,9 @@ class GoogleUltraAutomator:
                 await self.proxy_bridge.stop()
             if self.proc:
                 try:
-                    subprocess.run(f"taskkill /F /T /PID {self.proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if os.name == "nt":
+                        subprocess.run(f"taskkill /F /T /PID {self.proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    else:
+                        self.proc.kill()
                 except Exception:
                     pass

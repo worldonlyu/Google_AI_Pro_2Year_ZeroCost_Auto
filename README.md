@@ -7,7 +7,7 @@
 Disclaimer: I did not develop this project; it is provided as an open-source resource for the community to analyze and learn from.  
 
 【一、运行环境要求】
-1. Windows 10 / 11 系统
+1. Windows 10 / 11 系统（macOS 亦已支持：双击运行 run.command，需已安装 Google Chrome）
 2. 已安装 Google Chrome 浏览器（默认路径即可）
 3. 已安装 Python 3.10 或更高版本（安装时勾选 Add Python to PATH）
 4. 网络环境：本机开启美区（US）代理，或在控制台左侧填写代理模板
