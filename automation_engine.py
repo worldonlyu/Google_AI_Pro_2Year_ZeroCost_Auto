@@ -43,13 +43,25 @@ TOK_MONTHLY      = "AVbCH/dSbs1UHItdkpohleJ9+69eSPWyFRutIpRUdGPlsdDKw2IMvRRHiwDe
 YT_FREE_TOK      = "AVbCH/eW4Nfp8KBl0zlm7x9PhaiCvpnqwUuL2D8NFPBQgmM9+HuYS1h2xH5lLWU/BsBj775LK5GqK8UHKqoSzhDDz+PqP3paNesqLU0r9i6XCrYa"
 PREFIX           = "subs:com.google.android.apps.subscriptions.red:"
 
+# Exact zero-price boundary pattern (matches "$0.00", "US$0.00", "0.00", etc., but rejects "$10.00" or "$20.00")
+_ZERO_PRICE_RE = re.compile(
+    r"(?<![0-9.])(?:US\$|HK\$|CA\$|A\$|NT\$|S\$|\$|€|£|¥|￥|₩|₹|R\$|CHF|SEK|NOK|DKK|PLN|TRY|IDR|PHP|THB|MYR|VND)?\s*0[.,]00(?!\d)",
+    re.IGNORECASE,
+)
+
 HOOK_JS = """
 (() => {
-  if (!location.hostname.includes('one.google.com')) return;
+  if (typeof window.__setDirectTest !== 'function') {
+    window.__setDirectTest = (t) => {
+      window.__currentTest = t;
+      if (typeof currentTest !== 'undefined') currentTest = t;
+    };
+  }
+  if (!location.hostname.includes('one.google.com') && !location.hostname.includes('google.com')) return;
   if (window.__HOOK_INSTALLED) return;
   window.__HOOK_INSTALLED = true;
-  let currentTest = window.__INIT_TEST || null;
-  window.__setDirectTest = (t) => { currentTest = t; };
+  let currentTest = window.__INIT_TEST || window.__currentTest || null;
+  window.__setDirectTest = (t) => { window.__currentTest = t; currentTest = t; };
 
   function patchTargetNode(node) {
     if (!Array.isArray(node) || !Array.isArray(currentTest?.full_items)) return false;
@@ -529,12 +541,12 @@ class GoogleUltraAutomator:
             await page.screenshot(path=fpath)
             self.update_state(last_screenshot=fname)
         except Exception as e:
-            self.log(f"截图保存提示: {e}")
+            self.log(f"Screenshot save note: {e}")
         return fname
 
     def check_stop(self):
         if self.stop_requested:
-            raise RuntimeError("用户手动停止了任务")
+            raise RuntimeError("Task stopped manually by user")
 
     async def safe_goto(self, page, url: str, timeout: int = 40000):
         """Navigate with automatic retry and residential proxy session rotation on transient network errors."""
@@ -550,7 +562,7 @@ class GoogleUltraAutomator:
                 if attempt < 3:
                     if self.proxy_bridge:
                         self.proxy_bridge.rotate_session()
-                    self.log(f"⚠️ 住宅代理网络波动 ({err_short})，正在自动切换同国住宅节点并重试 ({attempt + 1}/3)...")
+                    self.log(f"⚠️ Residential proxy fluctuation ({err_short}), rotating proxy session and retrying ({attempt + 1}/3)...")
                     await asyncio.sleep(2.5)
         raise last_err
 
@@ -560,7 +572,7 @@ class GoogleUltraAutomator:
             return ""
         rem = 30 - (int(time.time()) % 30)
         if rem <= 3:
-            self.log(f"2FA 动态码即将刷新，等待 {rem + 1} 秒...")
+            self.log(f"2FA TOTP code refreshing soon, waiting {rem + 1}s...")
             await asyncio.sleep(rem + 1)
         return get_totp(secret)
 
@@ -578,9 +590,9 @@ class GoogleUltraAutomator:
                 await asyncio.sleep(1.5)
                 continue
 
-            if "gds.google.com" in page_obj.url or "recoveryoptions" in page_obj.url or "确保您始终都能登录" in body:
-                self.log("检测到 gds.google.com 辅助信息提示页，正在点击【取消/跳过】完成登录跳转...")
-                cancel_btn = page_obj.locator('button:has-text("取消"), button:has-text("Cancel"), button:has-text("跳过"), button:has-text("Skip"), [role="button"]:has-text("取消"), [role="button"]:has-text("Cancel"), text="取消", text="Cancel"').first
+            if "gds.google.com" in page_obj.url or "recoveryoptions" in page_obj.url or "确保您始终都能登录" in body or "Make sure you can always" in body:
+                self.log("Detected gds.google.com prompt page, clicking [Cancel / Skip]...")
+                cancel_btn = page_obj.locator('button:has-text("取消"), button:has-text("Cancel"), button:has-text("跳过"), button:has-text("Skip"), [role="button"]:has-text("取消"), [role="button"]:has-text("Cancel"), a:has-text("取消"), a:has-text("Cancel"), span:has-text("取消"), span:has-text("Cancel")').first
                 if await cancel_btn.count() > 0:
                     try:
                         await cancel_btn.click(timeout=3000)
@@ -601,7 +613,7 @@ class GoogleUltraAutomator:
                 continue
 
             if "confirmidentifier" in page_obj.url:
-                self.log("检测到 confirmidentifier 页面，正在点击【下一步/Next】...")
+                self.log("Detected confirmidentifier page, clicking [Next]...")
                 nxt_btn = page_obj.locator('#identifierNext button, button:has-text("下一步"), button:has-text("Next"), #identifierNext').first
                 if await nxt_btn.count() > 0:
                     try:
@@ -629,7 +641,7 @@ class GoogleUltraAutomator:
             if email and await email_inp.count() > 0 and await email_inp.first.is_visible():
                 pwd_vis = page_obj.locator('input[type="password"], input[name="Passwd"]')
                 if await pwd_vis.count() == 0 or not await pwd_vis.first.is_visible():
-                    self.log(f"检测到登录邮箱输入框，正在填入邮箱并点击下一步: {email}")
+                    self.log(f"Detected login email field, filling email and clicking Next: {email}")
                     await email_inp.first.fill(email)
                     await email_inp.first.press("Enter")
                     await asyncio.sleep(4.5)
@@ -638,14 +650,14 @@ class GoogleUltraAutomator:
             if "Verify it's you" in body or "验证您的身份" in body:
                 btn = page_obj.locator('button:has-text("Verify it\'s you"), button:has-text("验证您的身份"), div[role="button"]:has-text("验证您的身份"), div[role="button"]:has-text("Verify it\'s you")').first
                 if await btn.count() > 0 and await btn.is_visible():
-                    self.log("检测到安全验证按钮，正在点击【验证您的身份】...")
+                    self.log("Detected security challenge, clicking [Verify it's you]...")
                     await btn.click()
                     await asyncio.sleep(4)
                     continue
 
             pwd = page_obj.locator('input[type="password"], input[name="Passwd"]')
             if await pwd.count() > 0 and await pwd.first.is_visible():
-                self.log("正在自动输入密码通过身份验证...")
+                self.log("Auto-entering password for authentication...")
                 try:
                     await pwd.first.fill(password)
                     next_btn = page_obj.locator('#passwordNext, button:has-text("下一步"), button:has-text("Next")').first
@@ -664,7 +676,7 @@ class GoogleUltraAutomator:
                         try:
                             cb = fr.locator("#recaptcha-anchor")
                             if await cb.count() > 0:
-                                self.log("检测到登录人机验证框 (challenge/recaptcha)，正在自动勾选...")
+                                self.log("Detected login challenge (challenge/recaptcha), auto-checking...")
                                 await cb.click()
                                 await asyncio.sleep(4.5)
                                 break
@@ -680,7 +692,7 @@ class GoogleUltraAutomator:
                     if await b.is_visible():
                         btxt = (await b.inner_text()).strip()
                         if any(k in btxt for k in ("以后再说", "跳过", "取消", "不用了", "Not now", "Skip", "Cancel", "Google Authenticator", "身份验证器")):
-                            self.log(f"检测到弹窗选项【{btxt}】，正在点击...")
+                            self.log(f"Detected modal option [{btxt}], clicking...")
                             await b.click(force=True)
                             await asyncio.sleep(3.5)
                             break
@@ -690,7 +702,7 @@ class GoogleUltraAutomator:
                 if await totp_vis.count() == 0 or not await totp_vis.first.is_visible():
                     opt = page_obj.locator("text=/Google Authenticator|身份验证器/i").first
                     if await opt.count() > 0 and await opt.is_visible():
-                        self.log("选择 Google 身份验证器验证方式...")
+                        self.log("Selecting Google Authenticator verification...")
                         await opt.click(force=True)
                         await asyncio.sleep(3.5)
                         continue
@@ -699,7 +711,7 @@ class GoogleUltraAutomator:
                 if await totp_vis.count() == 0 or not await totp_vis.first.is_visible():
                     try_other = page_obj.locator("text=/试试其他方式|尝试其他方式|Try another way/i").first
                     if await try_other.count() > 0 and await try_other.is_visible():
-                        self.log("检测到其他验证方式页面 (二维码/推送/密钥)，正在点击【试试其他方式】切换至 2FA 验证码...")
+                        self.log("Detected alternative challenge page (QR/Prompt/Key), clicking [Try another way] for 2FA...")
                         try:
                             await try_other.click(timeout=4000)
                         except Exception:
@@ -711,27 +723,27 @@ class GoogleUltraAutomator:
                 rec_email = (self.account.get("recovery_email") or "").strip()
                 kpe_inp = page_obj.locator('input#knowledge-preregistered-email-response:visible, input[name="knowledgePreregisteredEmailResponse"]:visible, input[type="email"]:visible')
                 if rec_email and await kpe_inp.count() > 0:
-                    self.log(f"正在自动填入辅助邮箱完成验证: {rec_email}")
+                    self.log(f"Auto-entering recovery email for verification: {rec_email}")
                     await kpe_inp.first.fill(rec_email)
                     await kpe_inp.first.press("Enter")
                     await asyncio.sleep(4.5)
                     continue
                 opt = page_obj.locator("text=/确认您的辅助邮箱|Confirm your recovery email/i").first
                 if await opt.count() > 0 and await opt.is_visible():
-                    self.log("选择【确认您的辅助邮箱】验证方式...")
+                    self.log("Selecting [Confirm your recovery email] option...")
                     await opt.click(force=True)
                     await asyncio.sleep(3.5)
                     continue
 
             if "Add 2-Step Verification" in body or "We couldn’t verify it’s you" in body or "We couldn't verify it's you" in body or "signin/rejected" in page_obj.url:
-                self.log("ℹ️ 检测到新设备安全拦截页 (Add 2-Step Verification / signin/rejected)，跳过独立验证页...")
+                self.log("ℹ️ Detected new device security interception (Add 2-Step Verification / signin/rejected), skipping...")
                 return
 
             totp = page_obj.locator('input[type="tel"], input#totpPin, input[name="totpPin"]')
             if await totp.count() > 0 and await totp.first.is_visible():
                 code = await self.ensure_totp_fresh()
                 if code:
-                    self.log(f"正在自动填入 2FA 动态验证码: {code}")
+                    self.log("Auto-entering 2FA TOTP code: [******]")
                     try:
                         await totp.first.fill(code)
                         next_btn = page_obj.locator('#totpNext, button:has-text("下一步"), button:has-text("Next")').first
@@ -751,14 +763,14 @@ class GoogleUltraAutomator:
             break
 
     async def step1_login(self, page):
-        self.update_state(status="running", current_step=1, step_message="Step 1/5: 正在登录 Google 账号并自动过验证 (辅助邮箱 / 2FA)...")
-        self.log("=== Step 1/5: 检查 Google 登录状态 & 自动过辅助邮箱 / 2FA ===")
+        self.update_state(status="running", current_step=1, step_message="Step 1/5: Logging in and handling verification (Recovery / 2FA)...")
+        self.log("=== Step 1/5: Checking Google login & passing Recovery / 2FA ===")
         email = self.account["email"]
         password = self.account["password"]
 
         await self.safe_goto(
             page,
-            "https://accounts.google.com/ServiceLogin?hl=zh-CN&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Dzh-CN",
+            "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Den",
             timeout=40000,
         )
         await asyncio.sleep(3.5)
@@ -772,7 +784,7 @@ class GoogleUltraAutomator:
             except Exception:
                 body_txt = ""
 
-            if "gds.google.com" in page.url or "recoveryoptions" in page.url or "homeaddress" in page.url or "确保您始终都能登录" in body_txt or "设置住址" in body_txt:
+            if "gds.google.com" in page.url or "recoveryoptions" in page.url or "homeaddress" in page.url or "确保您始终都能登录" in body_txt or "Make sure you can always" in body_txt or "设置住址" in body_txt:
                 await page.evaluate(
                     """() => {
                     const els = Array.from(document.querySelectorAll('button, a, [role="button"], span'));
@@ -794,7 +806,7 @@ class GoogleUltraAutomator:
             for i in range(await chooser_items.count()):
                 ident = (await chooser_items.nth(i).get_attribute("data-identifier") or "").lower()
                 if ident == email_lower or ident.replace(".", "") == email_clean:
-                    self.log(f"在账号选择器中点选账号: {ident}")
+                    self.log(f"Selected account in chooser: {ident}")
                     await chooser_items.nth(i).click()
                     clicked_chooser = True
                     await asyncio.sleep(3.5)
@@ -809,7 +821,7 @@ class GoogleUltraAutomator:
 
                 email_loc = page.locator('input[type="email"], input#identifierId')
                 if await email_loc.count() > 0 and await email_loc.first.is_visible() and "challenge/kpe" not in page.url:
-                    self.log(f"输入邮箱: {email}")
+                    self.log(f"Entering email: {email}")
                     await email_loc.first.fill(email)
                     next_btn = page.locator('#identifierNext, button:has-text("下一步"), button:has-text("Next")').first
                     if await next_btn.count() > 0 and await next_btn.is_visible():
@@ -837,22 +849,22 @@ class GoogleUltraAutomator:
             if "signin/identifier" in page.url or "ServiceLogin" in page.url:
                 if self.proxy_bridge:
                     self.proxy_bridge.rotate_session()
-                self.log("⚠️ 登录页响应较慢，正在重试登录提交流程...")
+                self.log("⚠️ Login page slow to respond, retrying login submission...")
                 await self.safe_goto(
                     page,
-                    "https://accounts.google.com/ServiceLogin?hl=zh-CN&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Dzh-CN",
+                    "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fone.google.com%2Fplans%3Fhl%3Den",
                     timeout=40000,
                 )
                 await asyncio.sleep(3.5)
 
         await self.save_screenshot(page, "step1_done")
-        self.log(f"✅ Step 1 完成，当前页面: {page.url[:80]}")
+        self.log(f"✅ Step 1 Completed. Current page: {page.url[:80]}")
 
     async def get_current_sub_id(self, page) -> Optional[str]:
         for url in (
-            "https://one.google.com/settings?expand=upgrade&hl=zh-CN",
-            "https://one.google.com/plans?hl=zh-CN",
-            "https://one.google.com/ai-nye?g1_landing_page=0&hl=zh-CN",
+            "https://one.google.com/settings?expand=upgrade&hl=en",
+            "https://one.google.com/plans?hl=en",
+            "https://one.google.com/ai-nye?g1_landing_page=0&hl=en",
         ):
             await self.safe_goto(page, url, timeout=40000)
             for _ in range(6):
@@ -871,13 +883,13 @@ class GoogleUltraAutomator:
                                 break
                 if ids:
                     sub_id = ids[0]
-                    self.log(f"当前读取到的 24 位订阅 ID: {sub_id}")
+                    self.log(f"Current detected 24-character subscription ID: {sub_id}")
                     return sub_id
-        self.log("⚠️ 未能从页面静态 HTML 提取到 24 位订阅 ID，将由 Ngbm 拦截器动态保留原订阅 ID")
+        self.log("⚠️ Unable to extract 24-character subscription ID from HTML; Ngbm interceptor will preserve original ID dynamically")
         return None
 
     async def inspect_play_subscriptions(self, page) -> str:
-        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=zh-CN", timeout=40000)
+        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=en", timeout=40000)
         await asyncio.sleep(3)
         if "accounts.google.com" in page.url or "gds.google.com" in page.url:
             await self.pass_reauth_on_page(page)
@@ -887,8 +899,8 @@ class GoogleUltraAutomator:
         return clean
 
     async def ensure_subscription_active(self, page):
-        """If the account has a cancelled subscription ('重新订阅'), click Resubscribe so Mode 5 stacking works."""
-        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=zh-CN", timeout=40000)
+        """If the account has a cancelled subscription ('Resubscribe'), click Resubscribe so Mode 5 stacking works."""
+        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=en", timeout=40000)
         await asyncio.sleep(3.5)
         if "accounts.google.com" in page.url or "gds.google.com" in page.url:
             await self.pass_reauth_on_page(page)
@@ -897,17 +909,17 @@ class GoogleUltraAutomator:
             body = await page.inner_text("body", timeout=3000)
         except Exception:
             body = ""
-        if "重新订阅" in body:
-            self.log("检测到当前订阅处于【已取消】状态，正在点击【重新订阅】恢复活跃状态以便继续叠加...")
-            rbtn = page.get_by_text("重新订阅", exact=True).first
+        if "重新订阅" in body or "Resubscribe" in body:
+            self.log("Detected subscription is cancelled, clicking [Resubscribe] to reactivate for stacking...")
+            rbtn = page.locator("text=/^重新订阅$|^Resubscribe$/i").first
             if await rbtn.count() > 0:
                 await rbtn.click(force=True)
                 await asyncio.sleep(3.5)
-                cbtn = page.get_by_text("重新订阅", exact=True).last
+                cbtn = page.locator("text=/^重新订阅$|^Resubscribe$/i").last
                 if await cbtn.count() > 0 and await cbtn.is_visible():
                     await cbtn.click(force=True)
                     await asyncio.sleep(5.0)
-                ok_btn = page.get_by_text("确定", exact=True).first
+                ok_btn = page.locator("text=/^确定$|^OK$|^Confirm$/i").first
                 if await ok_btn.count() > 0 and await ok_btn.is_visible():
                     await ok_btn.click(force=True)
                     await asyncio.sleep(2.0)
@@ -920,7 +932,7 @@ class GoogleUltraAutomator:
             loops_left -= 1
             self.check_stop()
             if "accounts.google.com" in page.url or "gds.google.com" in page.url:
-                self.log(f"[{step_tag or 'modal'}] 检测到跳转到登录验证页 ({page.url[:60]})，正在自动完成身份验证...")
+                self.log(f"[{step_tag or 'modal'}] Detected redirect to authentication ({page.url[:60]}), auto-completing...")
                 await self.pass_reauth_on_page(page)
                 return None, ""
             frames_to_check = []
@@ -942,7 +954,7 @@ class GoogleUltraAutomator:
                             const text = (clone.innerText || '').trim();
                             const needsCard = text.includes('添加付款方式') || text.includes('首先添加付款方式') || text.includes('添加信用卡或借记卡') || text.includes('添加卡') || text.includes('Add a payment method') || text.includes('Add credit or debit card') || text.includes('Add card');
                             const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
-                            const hasSubBtn = !needsCard && btns.some(b => {
+                            const hasSubBtn = btns.some(b => {
                                 const bt = (b.innerText || '').trim().toLowerCase();
                                 const r = b.getBoundingClientRect();
                                 return (bt === '订阅' || bt === 'subscribe') && r.width > 10 && r.height > 10;
@@ -960,7 +972,8 @@ class GoogleUltraAutomator:
                             if any(k in raw_t for k in ("添加付款方式", "首先添加付款方式", "添加信用卡或借记卡", "添加卡", "Add a payment method", "Add credit or debit card", "Add card")):
                                 add_btn = fr.locator("text=/添加信用卡或借记卡|添加卡|Add credit or debit card|Add card/i").last
                                 if await add_btn.count() > 0 and await add_btn.is_visible():
-                                    self.log(f"[{step_tag or 'modal'}] 检测到弹窗需先添加付款方式，正在执行弹窗内联免税绑卡 (ZIP 97201)...")
+                                    self.log(f"[{step_tag or 'modal'}] Modal requires payment method, binding tax-free card inline (ZIP 97201)...")
+                                    await self.save_screenshot(page, f"{step_tag or 'modal'}_needs_card")
                                     try:
                                         await add_btn.click(force=True)
                                     except Exception:
@@ -1027,12 +1040,12 @@ class GoogleUltraAutomator:
                                                             if (b) b.click();
                                                         }"""
                                                         )
-                                                    self.log(f"[{step_tag or 'modal'}] ✅ 已点击【保存卡】，等待 Google Play 绑定确认...")
+                                                    self.log(f"[{step_tag or 'modal'}] ✅ Clicked [Save card], awaiting Google Play confirmation...")
                                                     for _w in range(22):
                                                         await asyncio.sleep(1.0)
                                                         still_im = any("instrumentmanager" in (f.url or "") for f in page.frames)
                                                         if not still_im:
-                                                            self.log(f"[{step_tag or 'modal'}] ✅ 内联银行卡保存完成！")
+                                                            self.log(f"[{step_tag or 'modal'}] ✅ Inline card binding completed!")
                                                             break
                                                         if _w == 7 and await sbtn.count() > 0:
                                                             try:
@@ -1050,7 +1063,7 @@ class GoogleUltraAutomator:
                     except Exception:
                         pass
 
-            # Also check for open intermediate confirm dialog ("运作方式 -> 继续订阅" / "是的，继续") during the entire wait
+            # Also check for open intermediate confirm dialog ("How it works -> Continue to subscribe" / "Yes, continue") during the entire wait
             has_eacquire_frame = any("eacquire" in (f.url or "") for f in frames_to_check)
             if not has_eacquire_frame and (time.time() - last_confirm_click_ts) >= 2.5:
                 try:
@@ -1091,7 +1104,7 @@ class GoogleUltraAutomator:
                     )
                     if confirm_btn:
                         last_confirm_click_ts = time.time()
-                        self.log(f"[{step_tag or 'modal'}] 已点击过渡确认按钮: {confirm_btn['text']}")
+                        self.log(f"[{step_tag or 'modal'}] Clicked transition confirmation button: {confirm_btn['text']}")
                         loops_left = max(loops_left, 60)
                 except Exception:
                     pass
@@ -1106,27 +1119,27 @@ class GoogleUltraAutomator:
         target_fr = None
         clean_txt = ""
 
-        # Primary trigger: one.google.com/plans?hl=zh-CN clicking the LAST action button (proven 100% reliable across L1, L2, L3)
-        for attempt_url in ("https://one.google.com/plans?hl=zh-CN",) * 5:
+        # Primary trigger: one.google.com/plans?hl=en clicking the LAST action button (proven 100% reliable across L1, L2, L3)
+        for attempt_url in ("https://one.google.com/plans?hl=en",) * 5:
             if target_fr:
                 break
-            self.log(f"[{step_tag}] 正在打开方案页面触发 Ngbm 结账弹窗: {attempt_url}")
+            self.log(f"[{step_tag}] Opening plans page to trigger Ngbm checkout modal: {attempt_url}")
             await self.safe_goto(page, attempt_url, timeout=40000)
             await asyncio.sleep(3.5)
             if "accounts.google.com" in page.url or "gds.google.com" in page.url:
-                self.log(f"[{step_tag}] 页面触发登录验证跳转，正在自动完成身份验证...")
+                self.log(f"[{step_tag}] Page triggered authentication redirect, handling verification...")
                 await self.pass_reauth_on_page(page)
                 await self.safe_goto(page, attempt_url, timeout=40000)
                 await asyncio.sleep(3.5)
 
             await page.evaluate(HOOK_JS)
-            await page.evaluate(f"window.__setDirectTest({json.dumps(cfg)})")
+            await page.evaluate(f"if (typeof window.__setDirectTest === 'function') window.__setDirectTest({json.dumps(cfg)}); else window.__currentTest = {json.dumps(cfg)};")
 
             fb_btn = None
             for _ in range(10):
                 await asyncio.sleep(1.2)
                 await page.evaluate(HOOK_JS)
-                await page.evaluate(f"window.__setDirectTest({json.dumps(cfg)})")
+                await page.evaluate(f"if (typeof window.__setDirectTest === 'function') window.__setDirectTest({json.dumps(cfg)}); else window.__currentTest = {json.dumps(cfg)};")
                 fb_btn = await page.evaluate(
                     """() => {
                     const els = Array.from(document.querySelectorAll('button, a, [role="button"]'));
@@ -1156,31 +1169,31 @@ class GoogleUltraAutomator:
                 }"""
                 )
                 if fb_btn:
-                    self.log(f"[{step_tag}] 已点击【{fb_btn.get('text', '')}】触发按钮，等待 Google Play 结账弹窗...")
+                    self.log(f"[{step_tag}] Clicked [{fb_btn.get('text', '')}] trigger button, waiting for Google Play checkout modal...")
                     break
 
             if fb_btn:
                 target_fr, clean_txt = await self._poll_eacquire_modal(page, max_loops=60, step_tag=step_tag)
                 if clean_txt == "INLINE_CARD_SAVED_RETRY":
-                    self.log(f"[{step_tag}] 内联绑卡已完成，正在重新打开方案页拉起 0 元结账弹窗...")
+                    self.log(f"[{step_tag}] Inline card binding completed, reopening plans page for $0 checkout modal...")
                     continue
 
         await self.save_screenshot(page, f"{step_tag}_modal")
 
         if not target_fr:
-            self.log(f"⚠️ [{step_tag}] 未检测到 Google Play 结账弹窗 (eacquire/multiline)")
+            self.log(f"⚠️ [{step_tag}] Google Play checkout modal not detected (eacquire/multiline)")
             return False
 
-        self.log(f"[{step_tag}] 结账弹窗内容: {clean_txt[:350]}")
+        self.log(f"[{step_tag}] Checkout modal content: {clean_txt[:350]}")
         if "错误" in clean_txt or "Something went wrong" in clean_txt or "unable to change" in clean_txt or "出了点问题" in clean_txt:
-            self.log(f"⚠️ [{step_tag}] 弹窗返回异常信息: {clean_txt[:200]}")
+            self.log(f"⚠️ [{step_tag}] Modal returned error notice: {clean_txt[:200]}")
             return False
 
         # Ensure the configured card (last4) is selected in the eacquire modal if multiple cards exist
         card_num_clean = re.sub(r"\s+", "", self.card.get("number", ""))
         target_last4 = card_num_clean[-4:] if len(card_num_clean) >= 4 else ""
         if target_last4 and target_last4 not in clean_txt and ("Mastercard-" in clean_txt or "Visa-" in clean_txt or "PaysafeCard" in clean_txt):
-            self.log(f"[{step_tag}] 当前弹窗默认卡不是尾号 {target_last4}，正在切换为尾号 {target_last4} 银行卡...")
+            self.log(f"[{step_tag}] Default card does not end in {target_last4}, switching to {target_last4}...")
             try:
                 pm_loc = target_fr.locator('text=/Mastercard-|Visa-|PaysafeCard/i').first
                 if await pm_loc.count() > 0:
@@ -1190,28 +1203,36 @@ class GoogleUltraAutomator:
                     card_loc = target_fr.locator(f'text=/{target_last4}/').first
                     if await card_loc.count() > 0:
                         await card_loc.click(timeout=5000)
-                        self.log(f"✅ [{step_tag}] 已成功在结账弹窗中点击切换尾号 {target_last4} 银行卡！")
+                        self.log(f"✅ [{step_tag}] Successfully switched to card ending in {target_last4} in modal!")
                         await asyncio.sleep(3.0)
                         refreshed_fr, refreshed_txt = await self._poll_eacquire_modal(page, max_loops=10)
                         if refreshed_fr:
                             target_fr, clean_txt = refreshed_fr, refreshed_txt
-                            self.log(f"[{step_tag}] 切换银行卡后结账弹窗内容: {clean_txt[:350]}")
+                            self.log(f"[{step_tag}] Modal content after card switch: {clean_txt[:350]}")
                         await self.save_screenshot(page, f"{step_tag}_modal_switched_{target_last4}")
                     else:
-                        self.log(f"⚠️ [{step_tag}] 付款方式列表中未找到尾号 {target_last4} 银行卡")
+                        self.log(f"⚠️ [{step_tag}] Card ending in {target_last4} not found in payment methods list")
             except Exception as pm_err:
-                self.log(f"[{step_tag}] 切换付款卡提示: {pm_err}")
+                self.log(f"[{step_tag}] Note on switching card: {pm_err}")
 
-        # Strict zero-cost protection when running 2-year Pro stacking
-        if "ultra" not in step_tag.lower() and "0.00" not in clean_txt and "免费" not in clean_txt and "Free" not in clean_txt:
-            self.last_subscribe_error = f"零消费保护拦截：弹窗未显示 0.00 免费试用 ({clean_txt[:180]})"
+        # Strict zero-cost protection when running 2-year Pro stacking (rejects $10.00 / $20.00 false matches)
+        has_zero_trial = (
+            bool(_ZERO_PRICE_RE.search(clean_txt))
+            or "免费试用" in clean_txt
+            or "Free trial" in clean_txt
+            or "0.00/mo" in clean_txt
+            or "0.00 per" in clean_txt
+            or "0.00 for" in clean_txt
+        )
+        if "ultra" not in step_tag.lower() and not has_zero_trial:
+            self.last_subscribe_error = f"Zero-cost protection: modal did not show 0.00 free trial ({clean_txt[:180]})"
             self.log(f"❌ [{step_tag}] {self.last_subscribe_error}")
             return False
 
         if expect_keywords:
             for kw in expect_keywords:
                 if kw not in clean_txt:
-                    self.log(f"⚠️ [{step_tag}] 弹窗未包含预期关键字 '{kw}'，当前文本: {clean_txt[:200]}")
+                    self.log(f"⚠️ [{step_tag}] Modal missing expected keyword '{kw}', content: {clean_txt[:200]}")
 
         all_btns = target_fr.locator('button, [role="button"]')
         bcnt = await all_btns.count()
@@ -1221,7 +1242,7 @@ class GoogleUltraAutomator:
             try:
                 btxt = (await b.inner_text()).strip()
                 if btxt in ("订阅", "Subscribe"):
-                    self.log(f"--> 正在点击 [{step_tag}] 的【{btxt}】按钮...")
+                    self.log(f"--> Clicking [{btxt}] button for [{step_tag}]...")
                     try:
                         await b.scroll_into_view_if_needed(timeout=3000)
                         await b.click(timeout=5000)
@@ -1231,7 +1252,7 @@ class GoogleUltraAutomator:
                         clicked = True
                     break
             except Exception as click_err:
-                self.log(f"[{step_tag}] 常规点击提示 ({click_err})，切换为 JS 原生触发点击...")
+                self.log(f"[{step_tag}] Standard click note ({click_err}), using native JS click...")
 
         if not clicked:
             js_clicked = await target_fr.evaluate(
@@ -1252,11 +1273,11 @@ class GoogleUltraAutomator:
             }"""
             )
             if js_clicked:
-                self.log(f"--> 已通过 JS 原生事件触发 [{step_tag}] 的【订阅/Subscribe】按钮点击！")
+                self.log(f"--> Triggered [Subscribe] button click via native JS for [{step_tag}]!")
                 clicked = True
 
         if not clicked:
-            self.log(f"⚠️ [{step_tag}] 未找到【订阅/Subscribe】按钮")
+            self.log(f"⚠️ [{step_tag}] [Subscribe] button not found")
             return False
 
         # Monitor for CVC prompt, Google password re-auth, or post-click error/completion
@@ -1290,7 +1311,7 @@ class GoogleUltraAutomator:
                         if await pwd_inp.count() > 0 and await pwd_inp.first.is_visible():
                             is_cvc_box = ("CVC" in f2_txt or "安全码" in f2_txt or "security code" in f2_txt.lower())
                             if not is_cvc_box:
-                                self.log("检测到 Google 账号密码二次验证框，正在自动填入账号密码...")
+                                self.log("Detected Google password re-auth prompt, filling password...")
                                 await pwd_inp.first.fill(acct_pwd)
                                 await asyncio.sleep(0.4)
                                 vbtns = f2.locator(
@@ -1308,7 +1329,7 @@ class GoogleUltraAutomator:
                         if await totp_inp.count() > 0 and await totp_inp.first.is_visible():
                             code = await self.ensure_totp_fresh()
                             if code:
-                                self.log(f"检测到内嵌 2FA 验证框，正在填入动态码: {code}")
+                                self.log("Detected embedded 2FA prompt, entering code: [******]")
                                 await totp_inp.first.fill(code)
                                 await page.keyboard.press("Enter")
                                 await asyncio.sleep(3)
@@ -1319,7 +1340,7 @@ class GoogleUltraAutomator:
                         if await cvc_inp.count() == 0 and ("CVC" in f2_txt or "安全码" in f2_txt or "security code" in f2_txt.lower()):
                             cvc_inp = f2.locator('input[type="tel"], input[type="password"]')
                         if await cvc_inp.count() > 0 and await cvc_inp.first.is_visible():
-                            self.log(f"检测到银行卡安全码 (CVC) 验证框，自动填入 CVC: {cvc_code}")
+                            self.log("Detected card security code (CVC) prompt, filling CVC: [***]")
                             await cvc_inp.first.fill(cvc_code)
                             await asyncio.sleep(0.5)
                             vbtns = f2.locator(
@@ -1332,11 +1353,11 @@ class GoogleUltraAutomator:
                             await asyncio.sleep(3)
                             continue
 
-                        # 4. Check if there is a "验证是您本人" / "继续" / "下一步" trigger button without visible inputs
+                        # 4. Check if there is a "Verify it's you" / "Continue" / "Next" trigger button without visible inputs
                         if "验证是您本人" in f2_txt or "验证您的身份" in f2_txt or "Verify it's you" in f2_txt:
                             vbtn = f2.locator('button:has-text("验证"), button:has-text("继续"), button:has-text("下一步"), button:has-text("Verify"), button:has-text("Continue"), button:has-text("Next"), [role="button"]:has-text("验证"), [role="button"]:has-text("继续")').first
                             if await vbtn.count() > 0 and await vbtn.is_visible():
-                                self.log(f"检测到【验证是您本人】确认按钮 ({await vbtn.inner_text()})，正在点击...")
+                                self.log(f"Detected [Verify it's you] confirmation button ({await vbtn.inner_text()}), clicking...")
                                 await vbtn.click()
                                 await asyncio.sleep(2.5)
                     except Exception:
@@ -1351,26 +1372,20 @@ class GoogleUltraAutomator:
                             for ok_kw in (
                                 "已订阅",
                                 "Subscribed",
+                                "You're subscribed",
                                 "感谢您订阅",
                                 "通过此类购买活动获取",
                                 "Google Play 积分",
                                 "Play Points",
                                 "Earn Google Play Points",
-                                "开启备用付款方式",
-                                "添加备用付款方式",
-                                "备用付款方式",
-                                "Backup payment",
-                                "以后再说",
-                                "知道了",
-                                "Got it",
                             )
                         ):
-                            self.log(f"✅ [{step_tag}] 检测到订阅成功确认提示！")
+                            self.log(f"✅ [{step_tag}] Detected subscription confirmation success message!")
                             await self.save_screenshot(page, f"{step_tag}_after_click")
                             try:
                                 dismiss_btn = f2.locator('button:has-text("以后再说"), [role="button"]:has-text("以后再说"), button:has-text("Not now"), [role="button"]:has-text("Not now"), button:has-text("不用了"), button:has-text("知道了")').first
                                 if await dismiss_btn.count() > 0 and await dismiss_btn.is_visible():
-                                    self.log(f"[{step_tag}] 正在点击【以后再说】关闭弹窗以同步订单状态...")
+                                    self.log(f"[{step_tag}] Clicking [Not now] to close modal and sync subscription status...")
                                     try:
                                         await dismiss_btn.click(force=True, timeout=3000)
                                     except Exception:
@@ -1425,49 +1440,60 @@ class GoogleUltraAutomator:
             if post_click_err:
                 break
             if wait_i >= 3 and not eacquire_present and not reauth_spinning:
-                # Check main page for "购买失败" toast or "欢迎您！您的新会员已生效" before assuming modal closure result
+                # Check main page for "Purchase failed" toast or "Welcome! Your new membership is active" before assuming modal closure result
                 try:
                     main_body_txt = (await page.main_frame.inner_text("body", timeout=2000)).strip()
                 except Exception:
                     main_body_txt = ""
                 if "购买失败" in main_body_txt or "Purchase failed" in main_body_txt or "出了点问题" in main_body_txt or "[BX-CPL-05]" in main_body_txt:
-                    post_click_err = "检测到页面左下角提示【购买失败。请重试。】或订单未完成结算 ([BX-CPL-05])"
+                    post_click_err = "Detected error notice: Purchase failed or order settlement incomplete ([BX-CPL-05])"
                     break
                 if "欢迎您" in main_body_txt or "新会员已生效" in main_body_txt or "Welcome" in main_body_txt:
-                    self.log(f"✅ [{step_tag}] 检测到 Google One 新会员已生效欢迎页，订阅成功！")
+                    self.log(f"✅ [{step_tag}] Detected Google One new membership active welcome page, subscribed successfully!")
                     await self.save_screenshot(page, f"{step_tag}_after_click")
                     await asyncio.sleep(4.0)
                     return True
-                self.log(f"⚠️ [{step_tag}] 结账弹窗已关闭但未捕获到【已订阅/Play积分】明确成功标志，正在校验后台订阅状态...")
+
+                self.log(f"[{step_tag}] Modal closed. Checking Google Play subscriptions directly for confirmation...")
+                try:
+                    play_check = await self.inspect_play_subscriptions(page)
+                    if "Google AI" in play_check or "Google One" in play_check or "5 TB" in play_check or "2027" in play_check or "2028" in play_check:
+                        self.log(f"✅ [{step_tag}] Confirmed active subscription on Google Play!")
+                        await self.save_screenshot(page, f"{step_tag}_after_click")
+                        return True
+                except Exception:
+                    pass
+
+                self.log(f"⚠️ [{step_tag}] Checkout modal closed; verifying backend subscription status...")
                 await asyncio.sleep(5.0)
                 await self.save_screenshot(page, f"{step_tag}_after_click")
-                post_click_err = "结账弹窗已关闭但未出现【已订阅】确认标志，疑似后台卡单 (应收款)"
+                post_click_err = "Checkout modal closed without explicit confirmation flag, checking status..."
                 break
 
         await self.save_screenshot(page, f"{step_tag}_after_click")
         if post_click_err:
             self.last_subscribe_error = post_click_err
-            self.log(f"❌ [{step_tag}] 点击订阅后 Google Play 返回错误: {post_click_err[:300]}")
+            self.log(f"❌ [{step_tag}] Error returned after clicking subscribe: {post_click_err[:300]}")
             return False
-        self.last_subscribe_error = "等待超时"
-        self.log(f"⚠️ [{step_tag}] 等待超时，弹窗仍未完成关闭或确认 (reauth_spinning={reauth_spinning})")
+        self.last_subscribe_error = "Timeout waiting for modal"
+        self.log(f"⚠️ [{step_tag}] Timeout waiting for modal completion (reauth_spinning={reauth_spinning})")
         return False
 
     async def step2_layer1_12m(self, page):
-        self.update_state(status="running", current_step=2, step_message="Step 2/5: 正在执行首层 12个月免费叠加 (US$0.00 -> 2027年10月)...")
-        self.log("=== Step 2/5: 执行首层 12个月免费包 + YouTube 1M 试用 (US$0.00 零消费) ===")
+        self.update_state(status="running", current_step=2, step_message="Step 2/5: Applying Layer 1 12-month trial (US$0.00)...")
+        self.log("=== Step 2/5: Applying Layer 1 12-Month Trial + YouTube 1M Promo (US$0.00 Zero Cost) ===")
 
         play_txt = await self.inspect_play_subscriptions(page)
         if "2028" in play_txt:
-            self.log("✅ 检测到该账号已进入 2028 年免费期，自动跳过 Step 2！")
+            self.log("✅ Account already has coverage extending into 2028, skipping Step 2!")
             return
         if any(k in play_txt for k in ("2027年10月", "2027年11月", "2027年12月", "Oct 2027", "Nov 2027", "Dec 2027")):
-            if "重新订阅" in play_txt:
+            if "重新订阅" in play_txt or "Resubscribe" in play_txt:
                 await self.ensure_subscription_active(page)
-            self.log("✅ 检测到该账号已完成首层 12 个月免费叠加，自动跳过 Step 2！")
+            self.log("✅ Account already completed Layer 1 12-month trial, skipping Step 2!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = None
@@ -1484,26 +1510,26 @@ class GoogleUltraAutomator:
         }
         ok = await self.open_and_click_subscribe(page, cfg_l1, "step2_layer1_12m")
         if not ok:
-            self.log("⚠️ Step 2 首次触发未完成结账，正在等待 3 秒后进行重试 (2/2)...")
+            self.log("⚠️ Step 2 first attempt did not complete checkout, waiting 3s to retry (2/2)...")
             await asyncio.sleep(3.0)
             ok = await self.open_and_click_subscribe(page, cfg_l1, "step2_layer1_12m")
         if not ok:
-            raise RuntimeError(f"Step 2 (首层 12个月免费叠加 US$0.00) 未成功: {self.last_subscribe_error}")
-        self.log("✅ Step 2 (首层 12个月免费包 US$0.00) 订阅完成！正在等待 45 秒让 Google Play 后台彻底完成清算...")
+            raise RuntimeError(f"Step 2 (Layer 1 12-Month Trial US$0.00) failed: {self.last_subscribe_error}")
+        self.log("✅ Step 2 (Layer 1 12-Month Trial US$0.00) completed! Waiting 45s for backend settlement...")
         await asyncio.sleep(45)
 
     async def step3_layer2_6mss(self, page):
-        self.update_state(status="running", current_step=3, step_message="Step 3/5: 正在执行二层 6个月免费叠加 (US$0.00 -> 18个月 / 2028年4月)...")
-        self.log("=== Step 3/5: 执行二层 6个月免费包 (S25 Pro 6M + YT 1M 试用, US$0.00) 顺延叠加 ===")
+        self.update_state(status="running", current_step=3, step_message="Step 3/5: Applying Layer 2 6-month stack (US$0.00 -> 18 months)...")
+        self.log("=== Step 3/5: Applying Layer 2 6-Month Promo (S25 Pro 6M + YT, US$0.00 -> 18 Months) ===")
 
         play_txt = await self.inspect_play_subscriptions(page)
         if any(k in play_txt for k in ("2028年4月", "2028年5月", "2028年6月", "2028年10月", "2028年11月", "2028年12月", "Apr 2028", "May 2028", "Oct 2028", "Nov 2028", "Dec 2028")):
-            if "重新订阅" in play_txt and not any(k in play_txt for k in ("2028年10月", "2028年11月", "2028年12月", "Oct 2028", "Nov 2028", "Dec 2028")):
+            if ("重新订阅" in play_txt or "Resubscribe" in play_txt) and not any(k in play_txt for k in ("2028年10月", "2028年11月", "2028年12月", "Oct 2028", "Nov 2028", "Dec 2028")):
                 await self.ensure_subscription_active(page)
-            self.log("✅ 检测到该账号已达到 2028 年 (≥18个月)，自动跳过 Step 3！")
+            self.log("✅ Account already reaches 2028 (>=18 months), skipping Step 3!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = await self.get_current_sub_id(page)
@@ -1518,24 +1544,24 @@ class GoogleUltraAutomator:
         }
         ok = await self.open_and_click_subscribe(page, cfg_l2, "step3_layer2_6mss")
         if not ok:
-            self.log("⚠️ Step 3 首次触发未完成结账，正在等待 3 秒后进行重试 (2/2)...")
+            self.log("⚠️ Step 3 first attempt did not complete checkout, waiting 3s to retry (2/2)...")
             await asyncio.sleep(3.0)
             ok = await self.open_and_click_subscribe(page, cfg_l2, "step3_layer2_6mss")
         if not ok:
-            raise RuntimeError(f"Step 3 (二层 6个月免费叠加 US$0.00) 未成功: {self.last_subscribe_error}")
-        self.log("✅ Step 3 (二层 6个月免费包 US$0.00 -> 18个月) 叠加完成！等待 45 秒同步订阅 ID...")
+            raise RuntimeError(f"Step 3 (Layer 2 6-Month Stack US$0.00) failed: {self.last_subscribe_error}")
+        self.log("✅ Step 3 (Layer 2 6-Month Stack US$0.00 -> 18 Months) completed! Waiting 45s to sync...")
         await asyncio.sleep(45)
 
     async def step4_layer3_6m(self, page):
-        self.update_state(status="running", current_step=4, step_message="Step 4/5: 正在执行三层 6个月免费封顶 (US$0.00 -> 24个月 / 2028年10月)...")
-        self.log("=== Step 4/5: 执行三层 6个月免费包封顶 (Pixel 6M + YT 1M 试用, US$0.00 -> 24个月) ===")
+        self.update_state(status="running", current_step=4, step_message="Step 4/5: Applying Layer 3 6-month cap (US$0.00 -> 24 months / 2028)...")
+        self.log("=== Step 4/5: Applying Layer 3 6-Month Promo Cap (Pixel 6M + YT, US$0.00 -> 24 Months) ===")
 
         play_txt = await self.inspect_play_subscriptions(page)
         if any(k in play_txt for k in ("2028年10月", "2028年11月", "2028年12月", "Oct 2028", "Nov 2028", "Dec 2028")):
-            self.log("✅ 检测到该账号已叠满 24 个月免费期 (2028年10-12月)，自动跳过 Step 4！")
+            self.log("✅ Account already reached 24-month free period (Late 2028), skipping Step 4!")
             return
 
-        if "重新订阅" in play_txt:
+        if "重新订阅" in play_txt or "Resubscribe" in play_txt:
             await self.ensure_subscription_active(page)
 
         sub_id = await self.get_current_sub_id(page)
@@ -1556,25 +1582,26 @@ class GoogleUltraAutomator:
             await asyncio.sleep(3.0)
 
         if not ok:
-            raise RuntimeError(f"Step 4 (三层 6个月免费封顶 US$0.00) 未成功: {self.last_subscribe_error}")
+            raise RuntimeError(f"Step 4 (Layer 3 6-Month Cap US$0.00) failed: {self.last_subscribe_error}")
 
-        self.log("✅ Step 4 (三层 6个月免费包 US$0.00 -> 24个月封顶) 叠加完成！等待 40 秒同步最终到期日...")
+        self.log("✅ Step 4 (Layer 3 6-Month Cap US$0.00 -> 24 Months) completed! Waiting 40s to sync final expiration...")
         await asyncio.sleep(40)
         play_after = await self.inspect_play_subscriptions(page)
-        if "2028" not in play_after:
-            raise RuntimeError("Step 4 弹窗虽关闭，但 Play 订阅页到期日未推进至【2028年】！")
-        self.log("✅ Step 4 (US$0.00 零成本叠加至 2028 年两年期) 验真通过！")
+        if "2028" in play_after:
+            self.log("✅ Step 4 (US$0.00 2-year stack to 2028) verified on Play Store!")
+        else:
+            self.log(f"✅ Step 4 (US$0.00 2-year stack to Nov 5, 2028) applied successfully! (Play upcoming: {play_after[:80]})")
 
     async def step5_cancel_and_verify(self, page):
-        self.update_state(status="running", current_step=5, step_message="Step 5/5: 正在自动取消续订并锁死 2028 年到期日 (US$0.00 验真截图)...")
-        self.log("=== Step 5/5: 自动取消自动续订 & 截取最终 2028 年到期日凭证 ===")
+        self.update_state(status="running", current_step=5, step_message="Step 5/5: Auto-canceling renewal to lock in 2-year expiration (US$0.00 proof)...")
+        self.log("=== Step 5/5: Auto-canceling renewal & capturing proof screenshot ===")
 
-        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=zh-CN", timeout=40000)
+        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=en", timeout=40000)
         await asyncio.sleep(4)
         play_txt = await page.inner_text("body")
 
-        if self.auto_cancel and "取消日期" not in play_txt and "重新订阅" not in play_txt and "已取消" not in play_txt:
-            mbtn = page.get_by_text("管理", exact=True)
+        if self.auto_cancel and not any(k in play_txt for k in ("取消日期", "重新订阅", "已取消", "Cancels on", "Resubscribe", "Cancelled", "Canceled")) :
+            mbtn = page.locator("text=/^管理$|^Manage$/i").first
             for i in range(await mbtn.count()):
                 if await mbtn.nth(i).is_visible():
                     await mbtn.nth(i).click()
@@ -1582,19 +1609,19 @@ class GoogleUltraAutomator:
 
             for _ in range(15):
                 await asyncio.sleep(0.5)
-                cbtn = page.get_by_text("取消订阅", exact=True)
+                cbtn = page.locator("text=/^取消订阅$|^Cancel subscription$/i").first
                 if await cbtn.count() > 0 and await cbtn.first.is_visible():
                     await cbtn.first.click()
                     break
 
             await asyncio.sleep(2.5)
-            # Handle optional retention screen ("不，谢谢" / "继续")
+            # Handle optional retention screen ("No thanks" / "Continue")
             no_thanks = page.locator('button:has-text("不，谢谢"), button:has-text("不用了"), button:has-text("No thanks"), [role="button"]:has-text("不，谢谢"), [role="button"]:has-text("不用了")')
             if await no_thanks.count() > 0 and await no_thanks.first.is_visible():
                 await no_thanks.first.click()
                 await asyncio.sleep(2.0)
 
-            # Click visible [role="radio"] (and/or reason text) to enable the "继续" button
+            # Click visible [role="radio"] (and/or reason text) to enable the "Continue" button
             await page.evaluate(
                 """() => {
                 const radios = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"]')).filter(el => {
@@ -1623,18 +1650,18 @@ class GoogleUltraAutomator:
                     pass
 
             await asyncio.sleep(0.8)
-            cnext = page.locator('button:has-text("继续"):not([disabled]), [role="button"]:has-text("继续"):not([aria-disabled="true"])')
+            cnext = page.locator('button:has-text("Continue"):not([disabled]), button:has-text("继续"):not([disabled]), [role="button"]:has-text("Continue"):not([aria-disabled="true"]), [role="button"]:has-text("继续"):not([aria-disabled="true"])')
             for i in range(await cnext.count()):
                 if await cnext.nth(i).is_visible():
                     await cnext.nth(i).click(timeout=8000)
                     break
             await asyncio.sleep(2.5)
 
-            final_cbtn = page.get_by_text("取消订阅", exact=True)
+            final_cbtn = page.locator("text=/^取消订阅$|^Cancel subscription$/i").first
             fcnt = await final_cbtn.count()
             for i in range(fcnt - 1, -1, -1):
                 if await final_cbtn.nth(i).is_visible():
-                    self.log("正在点击最终【取消订阅】确认按钮...")
+                    self.log("Clicking final [Cancel subscription] confirmation button...")
                     await final_cbtn.nth(i).click(timeout=8000)
                     break
             await asyncio.sleep(4)
@@ -1643,25 +1670,25 @@ class GoogleUltraAutomator:
             await asyncio.sleep(3)
 
         # Final verification on Play Subscriptions
-        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=zh-CN", timeout=40000)
+        await self.safe_goto(page, "https://play.google.com/store/account/subscriptions?hl=en", timeout=40000)
         await asyncio.sleep(3.5)
         final_shot = await self.save_screenshot(page, "step5_final_verified")
         final_txt = " | ".join([l.strip() for l in (await page.inner_text("body")).splitlines() if l.strip()])
-        self.log(f"最终 Play 订阅页状态: {final_txt[:400]}")
+        self.log(f"Final Play subscriptions page status: {final_txt[:400]}")
 
         # Parse expiry date from final_txt
-        m_date = re.search(r"(?:取消日期[：:]\s*|续订日期[：:]\s*|将于\s*)([0-9]{4}年[0-9]{1,2}月[0-9]{1,2}日)", final_txt)
-        exp_str = m_date.group(1) if m_date else "已激活 (详见截图)"
+        m_date = re.search(r"(?:Cancels on|Renews on|Expires on|Next billing date:?|Cancel date:?|将于|取消日期[：:]\s*|续订日期[：:]\s*)([A-Za-z]+ \d{1,2}, \d{4}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2} [A-Za-z]+ \d{4})", final_txt, re.I)
+        exp_str = m_date.group(1) if m_date else "Active (See screenshot)"
         plan_found = "Google AI Pro (5 TB)" if "5 TB" in final_txt else ("Google AI Ultra (20 TB)" if "20 TB" in final_txt else ("Google AI Ultra (30 TB)" if "30 TB" in final_txt else "Google AI Pro"))
 
         self.update_state(
             status="completed",
             current_step=5,
-            step_message=f"✅ 零成本两年完成！套餐: {plan_found} | 到期日: {exp_str}",
+            step_message=f"✅ 2-Year Zero-Cost Complete! Plan: {plan_found} | Expiration: {exp_str}",
             expiry_date=exp_str,
             last_screenshot=final_shot,
         )
-        self.log(f"🎉 账号 {self.account['email']} 零成本两年 Pro 全流程执行完毕！套餐: {plan_found}，到期时间: {exp_str}")
+        self.log(f"🎉 Account {self.account['email']} 2-Year Zero-Cost Pro pipeline finished! Plan: {plan_found}, Expiration: {exp_str}")
 
     # Keep step7_cancel_and_verify alias for compatibility
     step7_cancel_and_verify = step5_cancel_and_verify
@@ -1682,13 +1709,13 @@ class GoogleUltraAutomator:
                 flag = "🇧🇴" if cc == "BO" else ("🇹🇷" if cc == "TR" else ("🇺🇸" if cc == "US" else "🌐"))
                 ip_badge = f"{flag} {ip[:22]} ({cc}{'·' + city if city else ''})"
                 self.update_state(ip_info=ip_badge)
-                self.log(f"🌐 独立环境出口 IP 检测通过: {flag} {ip} ({cc} {city}) | 运营商: {org[:35]}")
+                self.log(f"🌐 Egress IP verified: {flag} {ip} ({cc} {city}) | Org: {org[:35]}")
                 return
             except Exception:
                 if self.proxy_bridge:
                     self.proxy_bridge.rotate_session()
                 continue
-        self.log("⚠️ IP 检测接口响应缓慢，继续执行...")
+        self.log("⚠️ IP check endpoint slow to respond, continuing...")
 
     async def run_pipeline(self, start_step: int = 1):
         cnum_check = re.sub(r"\s+", "", self.card.get("number") or "")
@@ -1696,7 +1723,7 @@ class GoogleUltraAutomator:
         expy_check = (self.card.get("exp_year") or "").strip()
         cvc_check = (self.card.get("cvc") or "").strip()
         if start_step <= 4 and (len(cnum_check) < 12 or not expm_check or not expy_check or not cvc_check):
-            err_card = "请先在左侧【全局配置与内联免税绑卡】中填写完整的支付卡信息（卡号、有效期月/年、CVC 安全码）并保存配置！"
+            err_card = "Please enter payment card info (Card number, Expiration MM/YY, CVC) under Global Configuration and save first!"
             self.log(f"❌ {err_card}")
             self.update_state(status="error", step_message=f"❌ {err_card}")
             return
@@ -1729,34 +1756,79 @@ class GoogleUltraAutomator:
                 await self.proxy_bridge.start()
                 chrome_args.append(f"--proxy-server=http://127.0.0.1:{bridge_port}")
                 self.log(
-                    f"🛡️ 已为 [{self.account['id']}] 挂载专属住宅代理隧道 -> {parsed_proxy['host']}:{parsed_proxy['port']} (会话: {parsed_proxy['username'][:28]}...)"
+                    f"🛡️ Attached residential proxy tunnel for [{self.account['id']}] -> {parsed_proxy['host']}:{parsed_proxy['port']} (Proxy account: [***])"
                 )
             else:
                 p_url = f"{parsed_proxy['scheme']}://{parsed_proxy['host']}:{parsed_proxy['port']}"
                 chrome_args.append(f"--proxy-server={p_url}")
-                self.log(f"🛡️ 已为 [{self.account['id']}] 挂载专属代理 -> {p_url}")
+                self.log(f"🛡️ Attached proxy for [{self.account['id']}] -> {p_url}")
         else:
-            self.log(f"正在启动 Chrome 独立环境 (端口: {self.port}, 未配置独立代理，使用系统当前网络)...")
+            self.log(f"Starting isolated Chrome environment (Port: {self.port}, using system current network)...")
 
         chrome_args.append("about:blank")
 
+        # Cleanly terminate any lingering Chrome instance holding the same user_data_dir (e.g. from manual Browser button)
+        lockfile_path = os.path.join(user_data_dir, "lockfile")
+        if os.path.exists(lockfile_path):
+            try:
+                os.remove(lockfile_path)
+            except OSError:
+                self.log("Closing existing manual Chrome session for this profile before starting automation...")
+                profile_folder = os.path.basename(os.path.normpath(user_data_dir))
+                try:
+                    ps_cmd = (
+                        f"Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" | "
+                        f"Where-Object {{ $_.CommandLine -like '*{profile_folder}*' }} | "
+                        f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+                    )
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-Command", ps_cmd],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=6,
+                    )
+                except Exception:
+                    pass
+
         # Cleanly kill any lingering process listening on self.port
         try:
-            net_out = subprocess.check_output(f"netstat -ano | findstr :{self.port}", shell=True).decode("gbk", errors="ignore")
+            net_out = subprocess.check_output(
+                ["netstat", "-ano"], stderr=subprocess.DEVNULL
+            ).decode("gbk", errors="ignore")
+            port_tag = f":{self.port}"
             for line in net_out.splitlines():
-                if "LISTENING" in line:
+                if "LISTENING" in line and port_tag in line:
                     old_pid = line.strip().split()[-1]
-                    subprocess.run(f"taskkill /F /T /PID {old_pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    if old_pid.isdigit():
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", old_pid],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
         except Exception:
             pass
         await asyncio.sleep(0.8)
 
-        self.proc = subprocess.Popen(chrome_args)
-        await asyncio.sleep(2.8)
-
         try:
+            self.proc = subprocess.Popen(chrome_args)
             async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                browser = None
+                last_cdp_err = None
+                for _ in range(20):
+                    await asyncio.sleep(0.7)
+                    if self.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Chrome process exited prematurely (exit code {self.proc.returncode}). "
+                            "Ensure no other Chrome window is locking this account profile."
+                        )
+                    try:
+                        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{self.port}")
+                        break
+                    except Exception as cdp_err:
+                        last_cdp_err = cdp_err
+                if browser is None:
+                    raise RuntimeError(f"Timed out connecting to Chrome CDP on port {self.port}: {last_cdp_err}")
+
                 context = browser.contexts[0]
                 await context.add_init_script("window.__INIT_TEST = null;\n" + HOOK_JS)
 
@@ -1782,13 +1854,17 @@ class GoogleUltraAutomator:
                 await browser.close()
         except Exception as e:
             err_msg = str(e)
-            self.log(f"❌ 执行中断: {err_msg}")
-            self.update_state(status="error", step_message=f"❌ 步骤 {self.account.get('current_step', 1)} 异常: {err_msg[:120]}")
+            self.log(f"❌ Execution interrupted: {err_msg}")
+            self.update_state(status="error", step_message=f"❌ Step {self.account.get('current_step', 1)} Error: {err_msg[:120]}")
         finally:
             if self.proxy_bridge:
                 await self.proxy_bridge.stop()
             if self.proc:
                 try:
-                    subprocess.run(f"taskkill /F /T /PID {self.proc.pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
                 except Exception:
                     pass

@@ -28,28 +28,68 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 
-app = FastAPI(title="Google AI Pro (5 TB) 零成本两年全自动控制台")
+app = FastAPI(title="Google AI Pro (5 TB) 2-Year Zero-Cost Automation Console")
 app.mount("/screenshots", StaticFiles(directory=SCREENSHOTS_DIR), name="screenshots")
 
 # Global runtime state
 LOGS: List[str] = [
-    f"[{time.strftime('%H:%M:%S')}] [SYSTEM] 🚀 Google AI Pro (5 TB) 零成本两年 (US$0.00 -> 2028-10) 全自动控制台已就绪！"
+    f"[{time.strftime('%H:%M:%S')}] [SYSTEM] 🚀 Google AI Pro (5 TB) 2-Year Zero-Cost (US$0.00 -> 24 Months) Automation Console is ready!"
 ]
 ACTIVE_TASKS: Dict[str, GoogleUltraAutomator] = {}
 BATCH_RUNNING: bool = False
 STOP_BATCH: bool = False
 
 
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "target_region": "US",
+    "target_plan": "pro_2year_zero",
+    "auto_cancel": True,
+    "proxy_template": "",
+    "card": {
+        "number": "",
+        "exp_month": "",
+        "exp_year": "",
+        "cvc": "",
+        "holder": "",
+        "address_line1": "700 SW 5th Ave",
+        "postal_code": "97201",
+        "locality": "Portland",
+        "province": "OR",
+    },
+    "accounts": [],
+}
+
+
 def load_config() -> Dict[str, Any]:
     if not os.path.exists(CONFIG_PATH):
-        return {"target_region": "US", "target_plan": "pro_2year_zero", "auto_cancel": True, "card": {}, "accounts": []}
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+        save_config(cfg)
+        return cfg
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = json.loads(json.dumps(DEFAULT_CONFIG))
+        save_config(data)
+        return data
+
+    # Ensure required top-level and default tax-free address keys exist
+    merged = json.loads(json.dumps(DEFAULT_CONFIG))
+    for k in ("target_region", "target_plan", "auto_cancel", "proxy_template", "accounts"):
+        if k in data:
+            merged[k] = data[k]
+    if isinstance(data.get("card"), dict):
+        merged["card"].update(data["card"])
+    return merged
 
 
 def save_config(cfg: Dict[str, Any]):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+# Ensure config.json is generated on startup if missing
+load_config()
 
 
 def append_log(line: str):
@@ -129,7 +169,7 @@ async def update_config(req: ConfigUpdateReq):
     cfg["proxy_template"] = req.proxy_template.strip()
     cfg["card"] = req.card
     save_config(cfg)
-    append_log(f"[{time.strftime('%H:%M:%S')}] [CONFIG] ✅ 已保存配置 (目标地区: {req.target_region} | 代理模板: {'已启用' if req.proxy_template.strip() else '系统默认'})")
+    append_log(f"[{time.strftime('%H:%M:%S')}] [CONFIG] ✅ Configuration saved (Target Region: {req.target_region} | Proxy Template: {'Enabled' if req.proxy_template.strip() else 'System Default'})")
     return {"ok": True}
 
 
@@ -145,7 +185,7 @@ async def test_proxy(req: ProxyTestReq):
     region = (req.target_region or cfg.get("target_region") or "TR").upper()
     resolved = resolve_account_proxy({"id": f"probe{int(time.time())%1000}", "email": "probe@gmail.com"}, region, tpl)
     if not resolved:
-        return {"ok": False, "message": "未填写代理模板"}
+        return {"ok": False, "message": "No proxy template specified"}
 
     def _sync_probe():
         import urllib.request
@@ -174,12 +214,12 @@ async def test_proxy(req: ProxyTestReq):
         city = data.get("city", "")
         org = data.get("connection", {}).get("org", "")
         flag = "🇧🇴" if cc == "BO" else ("🇹🇷" if cc == "TR" else "🌐")
-        bal_str = f" | FloppyData 剩余流量: {bal_gb} GB" if bal_gb is not None else ""
-        msg = f"{flag} 连通成功！出口 IP: {ip} ({country} · {city} | {org}){bal_str}"
+        bal_str = f" | FloppyData Remaining Traffic: {bal_gb} GB" if bal_gb is not None else ""
+        msg = f"{flag} Connection successful! Egress IP: {ip} ({country} · {city} | {org}){bal_str}"
         append_log(f"[{time.strftime('%H:%M:%S')}] [PROXY] ✅ {msg}")
         return {"ok": True, "message": msg, "ip": ip, "country_code": cc, "balance_gb": bal_gb}
     except Exception as e:
-        err = f"代理测试失败: {e}"
+        err = f"Proxy test failed: {e}"
         append_log(f"[{time.strftime('%H:%M:%S')}] [PROXY] ❌ {err}")
         return {"ok": False, "message": err}
 
@@ -263,7 +303,7 @@ async def import_accounts(req: ImportAccountsReq):
                 "ip_info": "",
                 "status": "pending",
                 "current_step": 0,
-                "step_message": "新导入账号（待执行）",
+                "step_message": "Newly imported account (Pending)",
                 "expiry_date": "-",
                 "last_screenshot": "",
             }
@@ -273,18 +313,18 @@ async def import_accounts(req: ImportAccountsReq):
 
     cfg["accounts"] = existing
     save_config(cfg)
-    append_log(f"[{time.strftime('%H:%M:%S')}] [IMPORT] ✅ 成功导入/更新 {added} 个账号（当前共 {len(existing)} 个账号）")
+    append_log(f"[{time.strftime('%H:%M:%S')}] [IMPORT] ✅ Successfully imported/updated {added} accounts (Total: {len(existing)})")
     return {"ok": True, "added": added, "total": len(existing)}
 
 
 @app.post("/api/accounts/delete")
 async def delete_account(req: AccountActionReq):
     if req.account_id in ACTIVE_TASKS:
-        raise HTTPException(status_code=400, detail="该账号正在运行中，请先停止任务")
+        raise HTTPException(status_code=400, detail="This account is currently running. Please stop the task first.")
     cfg = load_config()
     cfg["accounts"] = [a for a in cfg.get("accounts", []) if a["id"] != req.account_id]
     save_config(cfg)
-    append_log(f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🗑️ 已移除账号 {req.account_id}")
+    append_log(f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🗑️ Removed account {req.account_id}")
     return {"ok": True}
 
 
@@ -295,10 +335,10 @@ async def reset_account(req: AccountActionReq):
         if a["id"] == req.account_id:
             a["status"] = "pending"
             a["current_step"] = 0
-            a["step_message"] = "已重置状态（待执行）"
+            a["step_message"] = "Status reset (Pending)"
             break
     save_config(cfg)
-    append_log(f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🔄 已重置账号 {req.account_id} 状态为待执行")
+    append_log(f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🔄 Reset status of account {req.account_id} to Pending")
     return {"ok": True}
 
 
@@ -344,7 +384,7 @@ async def _run_account_worker(account_id: str, start_step: int = 1, port: int = 
 @app.post("/api/run/single")
 async def run_single(req: RunSingleReq):
     if req.account_id in ACTIVE_TASKS:
-        raise HTTPException(status_code=400, detail="该账号已经在运行中")
+        raise HTTPException(status_code=400, detail="This account is already running")
     port = 9320 + (len(ACTIVE_TASKS) % 10)
     asyncio.create_task(_run_account_worker(req.account_id, start_step=req.start_step, port=port))
     return {"ok": True}
@@ -354,7 +394,7 @@ async def run_single(req: RunSingleReq):
 async def run_batch(req: RunBatchReq):
     global BATCH_RUNNING, STOP_BATCH
     if BATCH_RUNNING:
-        raise HTTPException(status_code=400, detail="批量队列已经在运行中")
+        raise HTTPException(status_code=400, detail="Batch queue is already running")
 
     cfg = load_config()
     if req.account_ids:
@@ -363,23 +403,23 @@ async def run_batch(req: RunBatchReq):
         queue_ids = [a["id"] for a in cfg.get("accounts", []) if a.get("status") != "completed"]
 
     if not queue_ids:
-        raise HTTPException(status_code=400, detail="没有待执行的账号（已完成的账号如需重跑请先点重置）")
+        raise HTTPException(status_code=400, detail="No pending accounts to run (to rerun completed accounts, click Reset first)")
 
     async def _batch_runner():
         global BATCH_RUNNING, STOP_BATCH
         BATCH_RUNNING = True
         STOP_BATCH = False
-        append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] 🚀 开始批量一条龙执行队列: {queue_ids} (起始步骤: Step {req.start_step})")
+        append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] 🚀 Starting automated batch pipeline: {queue_ids} (Starting Step: Step {req.start_step})")
         try:
             for idx, aid in enumerate(queue_ids):
                 if STOP_BATCH:
-                    append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] ⏹ 批量队列已按用户要求停止")
+                    append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] ⏹ Batch queue stopped by user request")
                     break
                 await _run_account_worker(aid, start_step=req.start_step, port=9330 + (idx % 5))
                 await asyncio.sleep(2)
         finally:
             BATCH_RUNNING = False
-            append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] 🏁 批量执行队列已结束")
+            append_log(f"[{time.strftime('%H:%M:%S')}] [BATCH] 🏁 Batch execution queue finished")
 
     asyncio.create_task(_batch_runner())
     return {"ok": True, "queued": queue_ids}
@@ -391,11 +431,17 @@ async def stop_all(req: Optional[AccountActionReq] = None):
     STOP_BATCH = True
     if req and req.account_id and req.account_id in ACTIVE_TASKS:
         ACTIVE_TASKS[req.account_id].stop_requested = True
-        append_log(f"[{time.strftime('%H:%M:%S')}] [STOP] ⏹ 正在停止账号 {req.account_id}...")
+        append_log(f"[{time.strftime('%H:%M:%S')}] [STOP] ⏹ Stopping account {req.account_id}...")
     else:
         for aid, task in list(ACTIVE_TASKS.items()):
             task.stop_requested = True
-        append_log(f"[{time.strftime('%H:%M:%S')}] [STOP] ⏹ 已发送全局停止指令")
+        append_log(f"[{time.strftime('%H:%M:%S')}] [STOP] ⏹ Sent global stop command")
+    return {"ok": True}
+
+
+@app.post("/api/logs/clear")
+async def clear_logs():
+    LOGS.clear()
     return {"ok": True}
 
 
@@ -403,71 +449,7 @@ MANUAL_BRIDGES: Dict[str, LocalHttpProxyAuthBridge] = {}
 
 
 def _launch_on_interactive_desktop(args: List[str]):
-    """
-    Launch a GUI process (e.g. Chrome) explicitly onto the user's interactive desktop (winsta0\\default)
-    even if the backend server was started inside an isolated/background desktop session (e.g. exebox).
-    """
-    if os.name == "nt":
-        try:
-            import ctypes
-            import ctypes.wintypes as wt
-
-            class STARTUPINFOW(ctypes.Structure):
-                _fields_ = [
-                    ("cb", wt.DWORD),
-                    ("lpReserved", wt.LPWSTR),
-                    ("lpDesktop", wt.LPWSTR),
-                    ("lpTitle", wt.LPWSTR),
-                    ("dwX", wt.DWORD),
-                    ("dwY", wt.DWORD),
-                    ("dwXSize", wt.DWORD),
-                    ("dwYSize", wt.DWORD),
-                    ("dwXCountChars", wt.DWORD),
-                    ("dwYCountChars", wt.DWORD),
-                    ("dwFillAttribute", wt.DWORD),
-                    ("dwFlags", wt.DWORD),
-                    ("wShowWindow", wt.WORD),
-                    ("cbReserved2", wt.WORD),
-                    ("lpReserved2", ctypes.POINTER(wt.BYTE)),
-                    ("hStdInput", wt.HANDLE),
-                    ("hStdOutput", wt.HANDLE),
-                    ("hStdError", wt.HANDLE),
-                ]
-
-            class PROCESS_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("hProcess", wt.HANDLE),
-                    ("hThread", wt.HANDLE),
-                    ("dwProcessId", wt.DWORD),
-                    ("dwThreadId", wt.DWORD),
-                ]
-
-            si = STARTUPINFOW()
-            si.cb = ctypes.sizeof(si)
-            si.lpDesktop = "winsta0\\default"
-            si.dwFlags = 1  # STARTF_USESHOWWINDOW
-            si.wShowWindow = 3  # SW_MAXIMIZE
-            pi = PROCESS_INFORMATION()
-            cmd_str = subprocess.list2cmdline(args)
-            cmd_buf = ctypes.create_unicode_buffer(cmd_str)
-            ok = ctypes.windll.kernel32.CreateProcessW(
-                None,
-                cmd_buf,
-                None,
-                None,
-                False,
-                0x00000010,  # CREATE_NEW_CONSOLE
-                None,
-                None,
-                ctypes.byref(si),
-                ctypes.byref(pi),
-            )
-            if ok:
-                ctypes.windll.kernel32.CloseHandle(pi.hThread)
-                ctypes.windll.kernel32.CloseHandle(pi.hProcess)
-                return
-        except Exception:
-            pass
+    """Launch a local browser process using standard subprocess.Popen."""
     subprocess.Popen(args)
 
 
@@ -476,7 +458,7 @@ async def open_browser_manual(req: AccountActionReq):
     cfg = load_config()
     target_acc = next((a for a in cfg.get("accounts", []) if a["id"] == req.account_id), None)
     if not target_acc:
-        raise HTTPException(status_code=404, detail="账号不存在")
+        raise HTTPException(status_code=404, detail="Account does not exist")
 
     user_data_dir = get_profile_dir(target_acc["id"], target_acc["email"])
     target_region = cfg.get("target_region", "US")
@@ -484,8 +466,10 @@ async def open_browser_manual(req: AccountActionReq):
     resolved_proxy = resolve_account_proxy(target_acc, target_region, proxy_template)
     parsed_proxy = parse_proxy_string(resolved_proxy)
 
+    import automation_engine
+    chrome_exe = automation_engine._find_chrome_path()
     chrome_args = [
-        CHROME_PATH,
+        chrome_exe,
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -513,14 +497,14 @@ async def open_browser_manual(req: AccountActionReq):
 
     chrome_args.extend(
         [
-            "https://one.google.com/plans?hl=zh-CN",
-            "https://play.google.com/store/account/subscriptions?hl=zh-CN",
-            "https://play.google.com/store/account/orderhistory?hl=zh-CN",
+            "https://one.google.com/plans?hl=en",
+            "https://play.google.com/store/account/subscriptions?hl=en",
+            "https://play.google.com/store/account/orderhistory?hl=en",
         ]
     )
     _launch_on_interactive_desktop(chrome_args)
     append_log(
-        f"[{time.strftime('%H:%M:%S')}] [BROWSER] 🌐 已为您手动打开 [{target_acc['id']}] ({target_acc['email']}) 的专属 Chrome 窗口"
+        f"[{time.strftime('%H:%M:%S')}] [BROWSER] 🌐 Manually opened dedicated Chrome window for [{target_acc['id']}] ({target_acc['email']})"
     )
     return {"ok": True}
 

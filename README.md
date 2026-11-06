@@ -1,46 +1,82 @@
-========================================================================
-  Google AI Pro (5 TB) 零成本两年 (US$0.00 -> 24个月) 全自动控制台
-========================================================================
+# Google AI Pro (5 TB) 24-Month Provisioning Console
 
-【一、运行环境要求】
-1. Windows 10 / 11 系统
-2. 已安装 Google Chrome 浏览器（默认路径即可）
-3. 已安装 Python 3.10 或更高版本（安装时勾选 Add Python to PATH）
-4. 网络环境：本机开启美区（US）代理，或在控制台左侧填写代理模板
+**English** | [简体中文](README_ZH.md)
 
-【二、快速启动步骤】
-1. 首次使用请双击运行：【1_首次运行_安装依赖并启动.bat】
-2. 之后日常使用直接双击：【2_启动控制台.bat】
-3. 浏览器会自动打开控制台页面：http://127.0.0.1:8765
+Local batch-automation console that provisions 24-month Google One AI Pro (5 TB) trial stacks across Google accounts using Playwright CDP and `Ngbm` checkout RPC interception.
 
-【三、自定义填写支付卡 & 跑号说明】
-1. 填写支付卡（必填）：
-   - 在网页左侧【全局配置与内联免税绑卡】区域，填入你自己的 Visa 或 Mastercard 外币卡：
-     * 卡号（16位数字）
-     * 有效期（月 / 年，如 08 / 29）
-     * 安全码（3位 CVC）
-     * 持卡人英文姓名
-     * 免税邮编默认已填好 97201（美国俄勒冈免税州），无需修改
-   - 填写后点击【💾 保存配置】。
-   - 注：脚本内置严格 0 元消费保护，仅在结账弹窗确认为 US$0.00 时才会点击订阅，全程 0 扣费。
+> [!CAUTION]
+> **Disclaimer & Account Risk Warning — Use at Your Own Risk**
+>
+> This software is provided strictly for educational and security research purposes. Automated interaction with Google authentication flows, Google Play billing endpoints, and promotional trial token stacking violates Google's Terms of Service and Google One promotional policies.
+>
+> Using this tool may result in:
+> - Immediate revocation of promotional subscriptions or storage benefits
+> - Google Payments profile holds or verification locks
+> - Temporary or permanent suspension of your Google account(s)
+>
+> You are solely responsible for any accounts, payment methods, or network proxies you use with this software. The repository author assumes **no liability or responsibility** for banned accounts, revoked subscriptions, or billing issues.
 
-2. 批量导入 Google 账号：
-   - 在网页右侧【批量放号导入区】粘贴账号（每行一个），支持以下任意格式：
-     * 邮箱----密码----辅助邮箱
-     * 邮箱----密码----辅助邮箱----2FA密钥
-     * 邮箱----密码----2FA密钥
-   - 点击【➕ 一键导入账号列表】。
+---
 
-3. 开始全自动执行：
-   - 点击单个账号右侧的【▶ 执行】或顶部的【▶ 批量全自动执行】。
-   - 脚本会自动完成：
-     Step 1: 自动登录 Google 并通过辅助邮箱 / 2FA 验证
-     Step 2: 内联免税绑卡 + 首层 12 个月免费包 (US$0.00)
-     Step 3: 叠加二层 6 个月免费包 (US$0.00 -> 18个月)
-     Step 4: 叠加三层 6 个月免费包 (US$0.00 -> 24个月封顶)
-     Step 5: 自动前往 Google Play 取消自动续订，锁死 2 年到期权益并截图验真
+## How the 5-Stage Pipeline Works
 
+| Stage | Operation | Cumulative Duration | Checkout Guard |
+| :--- | :--- | :--- | :--- |
+| **Step 01** | Google session login, recovery email challenge, and 2FA TOTP verification | Auth | — |
+| **Step 02** | Layer 1 base trial (`5 TB AI Pro 12M`) + inline Oregon (`97201`) tax-free card binding | `0M → 12M` | `US$0.00` required |
+| **Step 03** | Layer 2 promotional token stack (`S25 +6M`, `ear8` mode `5` append) | `12M → 18M` | `US$0.00` required |
+| **Step 04** | Layer 3 promotional token cap (`Pixel +6M`, `ear8` mode `5` cap) | `18M → 24M` | `US$0.00` required |
+| **Step 05** | Google Play auto-renewal cancellation and verification screenshot capture | `24M locked` | Recurring billing disabled |
 
-# 卡网：https://faka.cdkey.si
-# 博客：https://blog.caowo.de
-# TG群：@Hello_Florence
+---
+
+## Requirements
+
+- **OS**: Windows 10 / 11
+- **Browser**: Google Chrome installed at the default system path
+- **Runtime**: Python 3.10+ (`Add Python to PATH` enabled)
+- **Network**: United States (US) egress IP via system VPN/proxy, or an outbound HTTP/SOCKS5 proxy configured in the dashboard
+
+---
+
+## Quick Start
+
+1. **First run (installs dependencies and starts the server)**:
+   Double-click `setup.bat` (or run `pip install -r requirements.txt` followed by `python app.py`).
+2. **Subsequent runs**:
+   Double-click `start.bat`.
+3. **Open the console**:
+   Navigate to `http://127.0.0.1:8765`.
+
+> [!NOTE]
+> On first launch, `app.py` automatically generates a local `config.json` pre-filled with the default Oregon tax-free billing address (`700 SW 5th Ave, Portland, OR 97201`). `config.json`, `profiles/`, and `screenshots/` are excluded via `.gitignore` so your credentials and payment details remain local.
+
+---
+
+## Configuration & Usage
+
+### 1. Billing & Network Configuration
+1. Under **Billing & Network Configuration**, enter a valid Visa or Mastercard for `$0.00` trial authorization:
+   - Card number (`16` digits)
+   - Expiration (`MM` / `YY`)
+   - Security code (`CVC`)
+   - Cardholder name
+2. Keep the default Oregon tax-free address (`700 SW 5th Ave`, `97201`, `OR`) so trial authorization remains strictly `$0.00` with `0%` sales tax.
+3. Click **Save configuration**.
+   - The checkout interceptor enforces a strict `$0.00` guard and aborts if a non-zero price appears on the checkout modal.
+
+### 2. Account Import Formats
+Paste one account per line under **Account Import**. Supported delimiters include `----`, `/`, `|`, comma, or whitespace:
+
+```text
+email@gmail.com----password----recovery@gmail.com
+email@gmail.com----password----recovery@gmail.com----JBSWY3DPEHPK3PXP
+email@gmail.com----password----JBSWY3DPEHPK3PXP
+```
+
+> **Note**: Base32 2FA TOTP secrets (`totp_secret`) should be pasted without spaces. Once imported, the **Account Queue** generates live 6-digit TOTP codes every 30 seconds.
+
+### 3. Running & Resuming Steps
+- Use **Run pending queue** in the top bar to process all non-completed accounts sequentially, or click **Run** on an individual account row.
+- Use the step selector (`Step 01 · Full` through `Step 05 · Cancel`) to resume from a specific stage if a previous run was interrupted.
+- Click **Browser** on any row to open that account's isolated Chrome profile window manually.
