@@ -20,6 +20,7 @@ from automation_engine import (
     parse_proxy_string,
     CHROME_PATH,
     BASE_DIR,
+    PROFILES_DIR,
     SCREENSHOTS_DIR,
 )
 
@@ -257,7 +258,11 @@ async def import_accounts(req: ImportAccountsReq):
             email = parts[0]
             password = parts[1]
             rest = parts[2:]
-            acc_id = f"Account_{len(existing) + 1}"
+            used_ids = {a.get("id") for a in existing}
+            next_num = 1
+            while f"Account_{next_num}" in used_ids:
+                next_num += 1
+            acc_id = f"Account_{next_num}"
         elif len(parts) >= 3 and "@" in parts[1]:
             acc_id = parts[0]
             email = parts[1]
@@ -322,10 +327,78 @@ async def delete_account(req: AccountActionReq):
     if req.account_id in ACTIVE_TASKS:
         raise HTTPException(status_code=400, detail="This account is currently running. Please stop the task first.")
     cfg = load_config()
-    cfg["accounts"] = [a for a in cfg.get("accounts", []) if a["id"] != req.account_id]
+    accounts = cfg.get("accounts", [])
+    target_acc = next((a for a in accounts if a.get("id") == req.account_id), None)
+    cfg["accounts"] = [a for a in accounts if a.get("id") != req.account_id]
     save_config(cfg)
-    append_log(f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🗑️ Removed account {req.account_id}")
-    return {"ok": True}
+
+    # Stop any manual browser proxy bridge for this account
+    old_bridge = MANUAL_BRIDGES.pop(req.account_id, None)
+    if old_bridge:
+        try:
+            await old_bridge.stop()
+        except Exception:
+            pass
+
+    removed_profile = False
+    removed_shots = 0
+    acc_email = (target_acc.get("email") if target_acc else "") or ""
+    safe_email = re.sub(r"[^a-zA-Z0-9_.-]", "_", acc_email or req.account_id)
+
+    # Remove only this account's isolated Chrome profile folder
+    candidate_dirs = {
+        os.path.join(PROFILES_DIR, f"profile_{safe_email}"),
+        os.path.join(PROFILES_DIR, f"profile_{req.account_id}"),
+    }
+    for pdir in candidate_dirs:
+        if os.path.isdir(pdir):
+            lockfile_path = os.path.join(pdir, "lockfile")
+            if os.path.exists(lockfile_path):
+                try:
+                    os.remove(lockfile_path)
+                except OSError:
+                    profile_folder = os.path.basename(os.path.normpath(pdir))
+                    try:
+                        ps_cmd = (
+                            f"Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" | "
+                            f"Where-Object {{ $_.CommandLine -like '*{profile_folder}*' }} | "
+                            f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"
+                        )
+                        subprocess.run(
+                            ["powershell", "-NoProfile", "-Command", ps_cmd],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=6,
+                        )
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
+            shutil.rmtree(pdir, ignore_errors=True)
+            if not os.path.exists(pdir):
+                removed_profile = True
+
+    # Remove only this account's screenshots
+    last_shot = (target_acc.get("last_screenshot") if target_acc else "") or ""
+    if os.path.isdir(SCREENSHOTS_DIR):
+        for fname in os.listdir(SCREENSHOTS_DIR):
+            if (
+                fname.startswith(f"{req.account_id}_")
+                or (safe_email and f"_{safe_email}_" in fname)
+                or (safe_email and fname.startswith(f"{safe_email}_"))
+                or (last_shot and fname == last_shot)
+            ):
+                try:
+                    os.remove(os.path.join(SCREENSHOTS_DIR, fname))
+                    removed_shots += 1
+                except OSError:
+                    pass
+
+    label = f"{req.account_id} ({acc_email})" if acc_email else req.account_id
+    append_log(
+        f"[{time.strftime('%H:%M:%S')}] [ACCOUNT] 🗑️ Removed {label} "
+        f"(profile deleted: {'yes' if removed_profile else 'none'}, screenshots deleted: {removed_shots})"
+    )
+    return {"ok": True, "removed_profile": removed_profile, "removed_screenshots": removed_shots}
 
 
 @app.post("/api/accounts/reset")

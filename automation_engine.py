@@ -535,7 +535,8 @@ class GoogleUltraAutomator:
         self.on_state(patch)
 
     async def save_screenshot(self, page, step_tag: str) -> str:
-        fname = f"{self.account['id']}_{step_tag}_{int(time.time())}.png"
+        safe_email = re.sub(r"[^a-zA-Z0-9_.-]", "_", self.account.get("email") or self.account["id"])
+        fname = f"{self.account['id']}_{safe_email}_{step_tag}_{int(time.time())}.png"
         fpath = os.path.join(SCREENSHOTS_DIR, fname)
         try:
             await page.screenshot(path=fpath)
